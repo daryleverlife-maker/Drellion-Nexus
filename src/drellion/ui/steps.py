@@ -301,11 +301,125 @@ class PreviewStep(StepBase):
             row.addWidget(select)
             card.addLayout(row)
 
+        sfx_card = self.card("Smart SFX")
+        sfx_intro = QLabel(
+            "Drellion uses lyric timing and the active sound library to suggest "
+            "three effect choices for suitable moments."
+        )
+        sfx_intro.setWordWrap(True)
+        sfx_card.addWidget(sfx_intro)
+
+        sfx_controls = QHBoxLayout()
+        suggest_button = QPushButton("Suggest SFX")
+        suggest_button.clicked.connect(self.suggest_fx)
+        sfx_controls.addWidget(suggest_button)
+        clear_button = QPushButton("Clear selected SFX")
+        clear_button.clicked.connect(self.clear_selected_fx)
+        sfx_controls.addWidget(clear_button)
+        sfx_controls.addStretch()
+        sfx_card.addLayout(sfx_controls)
+
+        self.sfx_status = QLabel("No SFX selected.")
+        self.sfx_status.setObjectName("Muted")
+        sfx_card.addWidget(self.sfx_status)
+
+        self.sfx_rows_widget = QWidget()
+        self.sfx_rows = QVBoxLayout(self.sfx_rows_widget)
+        self.sfx_rows.setContentsMargins(0, 0, 0, 0)
+        sfx_card.addWidget(self.sfx_rows_widget)
+
         next_button = QPushButton("Continue to Build →")
         next_button.setObjectName("Primary")
         next_button.clicked.connect(lambda: self.window.goto_step(4))
         self.layout.addWidget(next_button, 0, Qt.AlignRight)
         self.layout.addStretch()
+
+    def _clear_sfx_rows(self):
+        while self.sfx_rows.count():
+            item = self.sfx_rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            child_layout = item.layout()
+            if child_layout is not None:
+                while child_layout.count():
+                    child = child_layout.takeAt(0)
+                    if child.widget() is not None:
+                        child.widget().deleteLater()
+
+    def _update_sfx_status(self):
+        selected = list(self.window.project.settings.get("selected_sfx", []) or [])
+        self.sfx_status.setText(
+            f"{len(selected)} SFX event{'s' if len(selected) != 1 else ''} selected for Build."
+            if selected else "No SFX selected."
+        )
+
+    def suggest_fx(self):
+        try:
+            self.busy(True)
+            suggestions = self.window.engine.smart_sfx(self.window.project)
+            self._clear_sfx_rows()
+            if not suggestions:
+                self.sfx_rows.addWidget(
+                    QLabel("No matching SFX found. Add lyrics and refresh a sound library with FX files.")
+                )
+                return
+
+            for suggestion in suggestions:
+                row_widget = QWidget()
+                row = QHBoxLayout(row_widget)
+                row.setContentsMargins(0, 0, 0, 0)
+
+                label = QLabel(
+                    f"{suggestion.time:6.1f}s  ·  {suggestion.lyric}  ·  {suggestion.reason}"
+                )
+                label.setWordWrap(True)
+                row.addWidget(label, 1)
+
+                choice = QComboBox()
+                for option in suggestion.options:
+                    choice.addItem(Path(option).name, option)
+                choice.setMinimumWidth(250)
+                row.addWidget(choice)
+
+                use = QPushButton("Use")
+                use.clicked.connect(
+                    lambda _=False, s=suggestion, combo=choice: self.use_fx(s, combo)
+                )
+                row.addWidget(use)
+                self.sfx_rows.addWidget(row_widget)
+
+            self._update_sfx_status()
+        except Exception as exc:
+            QMessageBox.critical(self, "Smart SFX failed", str(exc))
+        finally:
+            self.busy(False)
+
+    def use_fx(self, suggestion, combo):
+        path = combo.currentData()
+        if not path:
+            return
+        selected = list(self.window.project.settings.get("selected_sfx", []) or [])
+        selected = [
+            event for event in selected
+            if abs(float(event.get("time", -999.0)) - float(suggestion.time)) > 0.02
+        ]
+        selected.append({
+            "time": float(suggestion.time),
+            "path": str(path),
+            "gain_db": -10.0,
+            "lyric": suggestion.lyric,
+            "reason": suggestion.reason,
+        })
+        selected.sort(key=lambda event: float(event.get("time", 0.0)))
+        self.window.project.settings["selected_sfx"] = selected
+        self.window.snapshot("Selected Smart SFX")
+        self._update_sfx_status()
+
+    def clear_selected_fx(self):
+        self.window.project.settings["selected_sfx"] = []
+        self.window.snapshot("Cleared Smart SFX")
+        self._update_sfx_status()
 
     def generate(self):
         try:
