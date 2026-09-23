@@ -9,6 +9,7 @@ from .audio.analysis import analyze_reference_file, analyze_vocal_file, dominant
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
 from .audio.render import master_audio, mix_sfx_events, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
+from .audio.vocal import process_vocal
 from .lyrics import align_lyrics, to_lrc
 from .library import SoundLibrary, SoundPalette
 from .sfx import SfxSuggestion, suggest_sfx
@@ -94,6 +95,12 @@ class NexusEngine:
         if vocal.phrase_regions:
             vocal_start = max(0.0, vocal.phrase_regions[0][0] - 0.5)
 
+        processed_vocal = process_vocal(
+            state.vocal.path,
+            out / "preview-vocal.wav",
+            state.vocal_preservation,
+        )
+
         previews: list[ArrangementPreview] = []
         pitch_class = dominant_vocal_pitch_class(vocal.pitch_track)
         tonic_midi = 48 + (pitch_class if pitch_class is not None else 0)
@@ -116,7 +123,7 @@ class NexusEngine:
                 sample_paths=palette.sample_paths(),
             )
             mixed = mix_vocal_and_instrumental(
-                state.vocal.path,
+                processed_vocal,
                 instrumental,
                 out / f"preview-{variant + 1}.wav",
                 vocal_start=vocal_start,
@@ -186,8 +193,13 @@ class NexusEngine:
                 sample_paths=palette.sample_paths(),
             )
 
-        build_path = mix_vocal_and_instrumental(
+        processed_vocal = process_vocal(
             state.vocal.path,
+            out / "processed-vocal.wav",
+            state.vocal_preservation,
+        )
+        build_path = mix_vocal_and_instrumental(
+            processed_vocal,
             instrumental,
             out / "build.wav",
             duration=duration,
@@ -225,6 +237,7 @@ class NexusEngine:
                 "selected_sfx": selected_sfx,
             },
             "outputs": {
+                "processed_vocal": str(processed_vocal),
                 "instrumental": str(instrumental),
                 "build": str(build_path),
             },
