@@ -16,6 +16,7 @@ class ExportPreset:
 
 
 PRESETS = {
+    "WAV": ExportPreset("WAV", ".wav", ("-c:a", "pcm_s24le")),
     "WAV 24-bit": ExportPreset("WAV 24-bit", ".wav", ("-c:a", "pcm_s24le")),
     "WAV 16-bit": ExportPreset("WAV 16-bit", ".wav", ("-c:a", "pcm_s16le")),
     "FLAC": ExportPreset("FLAC", ".flac", ("-c:a", "flac")),
