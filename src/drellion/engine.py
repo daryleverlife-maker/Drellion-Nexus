@@ -5,7 +5,8 @@ from pathlib import Path
 import json
 
 from .project import ProjectState
-from .audio.analysis import analyze_reference_file, analyze_vocal_file, dominant_vocal_pitch_class
+from .audio.analysis import analyze_vocal_file, dominant_vocal_pitch_class
+from .audio.mix_analysis import analyze_mix_file
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
 from .audio.render import master_audio, mix_sfx_events, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
@@ -26,15 +27,34 @@ class BuildResult:
 class NexusEngine:
     """Stable boundary between the UI/project model and local audio backends."""
 
+    def __init__(self):
+        self._vocal_cache: dict[tuple, VocalAnalysis] = {}
+        self._mix_cache: dict[tuple, ReferenceAnalysis] = {}
+
+    @staticmethod
+    def _file_key(path: str) -> tuple:
+        source = Path(path).resolve()
+        stat = source.stat()
+        return (str(source), stat.st_size, stat.st_mtime_ns)
+
     def analyze_vocal(self, state: ProjectState) -> VocalAnalysis:
         if not state.vocal.path:
             raise ValueError("A vocal stem is required for vocal-first generation.")
-        return analyze_vocal_file(state.vocal.path)
+        key = self._file_key(state.vocal.path)
+        if key not in self._vocal_cache:
+            self._vocal_cache[key] = analyze_vocal_file(state.vocal.path)
+        return self._vocal_cache[key]
+
+    def analyze_mix(self, path: str) -> ReferenceAnalysis:
+        key = self._file_key(path)
+        if key not in self._mix_cache:
+            self._mix_cache[key] = analyze_mix_file(path)
+        return self._mix_cache[key]
 
     def analyze_reference(self, state: ProjectState) -> ReferenceAnalysis:
         if not state.reference.path:
             raise ValueError("A reference track is required.")
-        return analyze_reference_file(state.reference.path)
+        return self.analyze_mix(state.reference.path)
 
     @staticmethod
     def _reference_guidance(state: ProjectState, reference: ReferenceAnalysis, variant: int = 0) -> tuple[float, list[float]]:
@@ -260,10 +280,29 @@ class NexusEngine:
         target_lufs = float(state.settings.get("target_lufs", -14.0))
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
+
+        source_analysis = self.analyze_mix(source)
+        reference_analysis = (
+            self.analyze_reference(state) if state.reference.path else None
+        )
         mastered = master_audio(
             source,
             out / "master.wav",
             target_lufs=target_lufs,
             true_peak=-1.0,
+            source_analysis=source_analysis,
+            reference_analysis=reference_analysis,
+            reference_influence=state.reference_influence,
         )
+
+        report = {
+            "target_lufs": target_lufs,
+            "reference_influence": state.reference_influence,
+            "source": asdict(source_analysis),
+            "reference": asdict(reference_analysis) if reference_analysis else None,
+            "output": str(mastered),
+        }
+        report_path = out / "master-report.json"
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        state.settings["master_report"] = str(report_path)
         return str(mastered)
