@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
+from .contracts import ReferenceAnalysis
 from .runtime import require_ffmpeg
 
 
@@ -118,6 +119,9 @@ def master_audio(
     *,
     target_lufs: float = -14.0,
     true_peak: float = -1.0,
+    source_analysis: ReferenceAnalysis | None = None,
+    reference_analysis: ReferenceAnalysis | None = None,
+    reference_influence: str = "Strong",
 ) -> Path:
     source = Path(source_path)
     target = Path(target_path)
@@ -127,22 +131,73 @@ def master_audio(
 
     target_lufs = min(-7.0, max(-24.0, float(target_lufs)))
     true_peak = min(-0.2, max(-3.0, float(true_peak)))
-    filters = (
-        "highpass=f=25,"
-        "acompressor=threshold=-16dB:ratio=1.6:attack=18:release=140:makeup=1,"
-        f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11,"
-        "alimiter=limit=0.97:attack=5:release=80"
+    influence = {
+        "light": 0.35,
+        "balanced": 0.65,
+        "strong": 1.0,
+    }.get((reference_influence or "Strong").strip().lower(), 1.0)
+
+    filters = ["highpass=f=25"]
+
+    band_centers = {
+        "sub_20_60": (40, 0.8),
+        "bass_60_120": (85, 1.0),
+        "lowmid_120_250": (180, 1.1),
+        "mid_250_500": (350, 1.0),
+        "mid_500_1000": (700, 1.0),
+        "presence_1_2k": (1400, 1.0),
+        "presence_2_4k": (2800, 1.0),
+        "high_4_8k": (6000, 0.8),
+        "air_8_11k": (9500, 0.7),
+    }
+
+    if source_analysis is not None and reference_analysis is not None:
+        for key, (frequency, q_value) in band_centers.items():
+            source_db = source_analysis.tone.get(key)
+            reference_db = reference_analysis.tone.get(key)
+            if source_db is None or reference_db is None:
+                continue
+            gain = max(-3.0, min(3.0, (reference_db - source_db) * influence))
+            if abs(gain) >= 0.15:
+                filters.append(
+                    f"equalizer=f={frequency}:t=q:w={q_value}:g={gain:.3f}"
+                )
+
+        source_width = source_analysis.stereo.get("side_mid_db")
+        reference_width = reference_analysis.stereo.get("side_mid_db")
+        if source_width is not None and reference_width is not None:
+            width_delta_db = (reference_width - source_width) * influence
+            multiplier = 10.0 ** (width_delta_db / 20.0)
+            multiplier = max(0.60, min(1.40, multiplier))
+            if abs(multiplier - 1.0) >= 0.02:
+                filters.append(f"extrastereo=m={multiplier:.4f}:c=0")
+
+        source_lra = float(source_analysis.dynamics.get("lra", 0.0) or 0.0)
+        reference_lra = float(reference_analysis.dynamics.get("lra", 0.0) or 0.0)
+        if source_lra > reference_lra + 0.8 and reference_lra > 0:
+            difference = min(8.0, source_lra - reference_lra)
+            ratio = 1.0 + min(2.0, (difference / 4.0) * influence)
+            filters.append(
+                f"acompressor=threshold=-16dB:ratio={ratio:.3f}:"
+                "attack=15:release=120:makeup=0"
+            )
+
+    filters.extend(
+        [
+            f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11",
+            "alimiter=limit=0.97:attack=5:release=80",
+        ]
     )
+
     _run([
         require_ffmpeg(), "-y", "-v", "error",
         "-i", str(source),
         "-vn",
-        "-af", filters,
+        "-af", ",".join(filters),
         "-c:a", "pcm_s24le",
         str(target),
     ])
     return target
-
 
 def copy_audio(source_path: str | Path, target_path: str | Path) -> Path:
     source = Path(source_path)
