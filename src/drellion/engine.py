@@ -9,6 +9,7 @@ from .audio.analysis import analyze_reference_file, analyze_vocal_file, dominant
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
 from .audio.render import master_audio, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
+from .lyrics import align_lyrics, to_lrc
 
 
 @dataclass
@@ -16,6 +17,7 @@ class BuildResult:
     build_path: str
     instrumental_path: str = ""
     report_path: str = ""
+    lyric_path: str = ""
 
 
 class NexusEngine:
@@ -124,11 +126,23 @@ class NexusEngine:
             duration=duration,
         )
 
+        lyric_cues = align_lyrics(state.lyrics, vocal.phrase_regions, vocal.duration)
+        lyric_path = ""
+        if lyric_cues:
+            lrc = out / "lyrics.lrc"
+            lrc.write_text(to_lrc(lyric_cues), encoding="utf-8")
+            lyric_path = str(lrc)
+
         report = {
             "engine": "drellion-local-alpha",
             "vocal": asdict(vocal),
             "reference": asdict(reference),
             "selected_preview": state.selected_preview or "Preview A",
+            "lyrics": {
+                "cue_count": len(lyric_cues),
+                "cues": [asdict(cue) for cue in lyric_cues],
+                "lrc_path": lyric_path,
+            },
             "generation": {
                 "reference_audio_copied": False,
                 "reference_exact_onsets_copied": False,
@@ -149,6 +163,7 @@ class NexusEngine:
             build_path=str(build_path),
             instrumental_path=str(instrumental),
             report_path=str(report_path),
+            lyric_path=lyric_path,
         )
 
     def master(self, state: ProjectState, output_dir: str | Path) -> str:
