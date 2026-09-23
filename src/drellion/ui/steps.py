@@ -67,9 +67,9 @@ class PreviewStep(StepBase):
     subtitle="Generate three different vocal-matched arrangements and choose one before committing to the full song."
     def __init__(self,window):
         super().__init__(window); c=self.card("Arrangement previews")
-        g=QPushButton("GENERATE 3 PREVIEWS"); g.setObjectName("Primary"); c.addWidget(g)
+        g=QPushButton("GENERATE 3 PREVIEWS"); g.setObjectName("Primary"); g.clicked.connect(window.generate_previews); c.addWidget(g)
         for name in ("Preview A","Preview B","Preview C"):
-            r=QHBoxLayout(); r.addWidget(QLabel(name)); r.addStretch(); r.addWidget(QPushButton("Play")); s=QPushButton("Select"); s.clicked.connect(lambda _=False,n=name:self.select(n)); r.addWidget(s); c.addLayout(r)
+            r=QHBoxLayout(); r.addWidget(QLabel(name)); r.addStretch(); play=QPushButton("Play"); play.clicked.connect(lambda _=False,n=name: window.play_preview(n)); r.addWidget(play); s=QPushButton("Select"); s.clicked.connect(lambda _=False,n=name:self.select(n)); r.addWidget(s); c.addLayout(r)
         self.layout.addStretch()
     def select(self,n): self.window.project.selected_preview=n; self.window.snapshot("Selected "+n)
 
@@ -77,7 +77,7 @@ class BuildStep(StepBase):
     title="Build the song"
     subtitle="Create the full original instrumental around your vocal and selected preview."
     def __init__(self,window):
-        super().__init__(window); c=self.card("Build pipeline"); c.addWidget(QLabel("Vocal → Drums → Bass → Harmony → Arrangement → SFX → Premix")); b=QPushButton("BUILD SONG"); b.setObjectName("Primary"); c.addWidget(b); self.layout.addStretch()
+        super().__init__(window); c=self.card("Build pipeline"); c.addWidget(QLabel("Vocal → Drums → Bass → Harmony → Arrangement → SFX → Premix")); b=QPushButton("BUILD SONG"); b.setObjectName("Primary"); b.clicked.connect(window.build_song); c.addWidget(b); self.layout.addStretch()
 
 class MasterStep(StepBase):
     title="Master and export"
@@ -85,5 +85,5 @@ class MasterStep(StepBase):
     def __init__(self,window):
         super().__init__(window); c=self.card("Master")
         t=QComboBox(); t.addItems(["-14 LUFS","-12 LUFS","-10 LUFS","-9 LUFS","Custom"]); c.addWidget(QLabel("Delivery loudness")); c.addWidget(t)
-        m=QPushButton("MASTER TRACK"); m.setObjectName("Primary"); c.addWidget(m)
+        m=QPushButton("MASTER TRACK"); m.setObjectName("Primary"); m.clicked.connect(window.master_track); c.addWidget(m)
         e=self.card("Export"); e.addWidget(QLabel("WAV • FLAC • MP3 • AAC/M4A • AIFF • OGG • OPUS • stems • lyrics/timestamps • project archive")); e.addWidget(QPushButton("Export…")); self.layout.addStretch()
