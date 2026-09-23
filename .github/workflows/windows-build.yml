@@ -7,12 +7,14 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "installer/**"
       - "pyproject.toml"
       - ".github/workflows/windows-build.yml"
 
 jobs:
   test-and-build:
     runs-on: windows-latest
+    timeout-minutes: 45
     permissions:
       contents: read
 
@@ -25,11 +27,18 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          ffmpeg -version
+          ffprobe -version
 
       - name: Run tests
         run: pytest -q
@@ -42,15 +51,30 @@ jobs:
             --paths src `
             src/drellion_nexus.py
 
-      - name: Smoke test packaged EXE exists
+      - name: Bundle FFmpeg runtime
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/DrellionNexus/DrellionNexus.exe")) { throw "DrellionNexus.exe was not created" }
+          $ffmpeg = Get-ChildItem "C:\ProgramData\chocolatey\lib" -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 1000000 } |
+            Select-Object -First 1
+          if (-not $ffmpeg) { throw "Could not locate the real ffmpeg.exe installed by Chocolatey." }
+          $ffbin = $ffmpeg.Directory.FullName
+          New-Item -ItemType Directory -Path "dist\DrellionNexus\bin" -Force | Out-Null
+          Copy-Item "$ffbin\ffmpeg.exe" "dist\DrellionNexus\bin\ffmpeg.exe" -Force
+          $ffprobe = Join-Path $ffbin "ffprobe.exe"
+          if (Test-Path $ffprobe) { Copy-Item $ffprobe "dist\DrellionNexus\bin\ffprobe.exe" -Force }
+          Get-ChildItem $ffbin -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "dist\DrellionNexus\bin\" -Force }
+
+      - name: Smoke test packaged layout
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\DrellionNexus\DrellionNexus.exe")) { throw "DrellionNexus.exe was not created." }
+          if (!(Test-Path "dist\DrellionNexus\bin\ffmpeg.exe")) { throw "Bundled ffmpeg.exe was not created." }
 
       - name: Package portable build
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/DrellionNexus/* -DestinationPath Drellion-Nexus-Portable.zip
+          Compress-Archive -Path "dist\DrellionNexus\*" -DestinationPath "Drellion-Nexus-Portable.zip" -Force
 
       - name: Install Inno Setup
         shell: pwsh
@@ -60,11 +84,12 @@ jobs:
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\DrellionNexus.iss"
-          if (!(Test-Path "installer-output\Drellion-Nexus-Setup.exe")) { throw "Installer was not created" }
+          if (!(Test-Path "installer-output\Drellion-Nexus-Setup.exe")) { throw "Installer was not created." }
 
       - name: Checksums
         shell: pwsh
         run: |
+          if (Test-Path "checksums.sha256") { Remove-Item "checksums.sha256" -Force }
           $files = @("Drellion-Nexus-Portable.zip", "installer-output\Drellion-Nexus-Setup.exe")
           foreach ($file in $files) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
@@ -81,3 +106,4 @@ jobs:
             installer-output/Drellion-Nexus-Setup.exe
             checksums.sha256
           if-no-files-found: error
+          retention-days: 14
