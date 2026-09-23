@@ -4,7 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import subprocess
 
-from .audio.runtime import require_ffmpeg
+from .audio.runtime import media_duration, require_ffmpeg
 from .project import ClipState, ProjectState, TrackState
 
 
@@ -28,12 +28,19 @@ def add_clip(
     duration: float = 0.0,
 ) -> ClipState:
     source = Path(path)
+    detected_duration = max(0.0, float(duration))
+    if detected_duration <= 0.0 and source.is_file():
+        try:
+            detected_duration = media_duration(source)
+        except Exception:
+            detected_duration = 0.0
+
     clip = ClipState(
         label=label or source.stem or "Clip",
         path=str(source),
         start=max(0.0, float(start)),
         source_offset=max(0.0, float(source_offset)),
-        duration=max(0.0, float(duration)),
+        duration=detected_duration,
     )
     track.clips.append(clip)
     return clip
