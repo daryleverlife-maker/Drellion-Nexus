@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+from array import array
+from pathlib import Path
+import math
+import random
+import wave
+
+
+SAMPLE_RATE = 22050
+
+
+def _note_hz(midi_note: int) -> float:
+    return 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+
+
+def _env(position: float, attack: float, release: float) -> float:
+    if position < 0.0 or position >= release:
+        return 0.0
+    if position < attack:
+        return position / max(attack, 1e-9)
+    return max(0.0, 1.0 - (position - attack) / max(release - attack, 1e-9))
+
+
+def _bar_template(bpm: float, variant: int, chord_index: int) -> array:
+    """Create one original stereo bar.
+
+    The pattern is generated from coarse musical descriptors only. It does not
+    accept or reproduce a reference track's onset sequence.
+    """
+    bpm = min(180.0, max(60.0, bpm or 90.0))
+    beat_seconds = 60.0 / bpm
+    bar_seconds = beat_seconds * 4.0
+    frames = max(1, round(bar_seconds * SAMPLE_RATE))
+    output = array("h")
+    rng = random.Random(81031 + variant * 97 + chord_index * 31)
+
+    # Independently composed minor-key palette. This is deliberately generated
+    # rather than extracted from the reference composition.
+    roots = [48, 45, 53, 46]  # C3, A2, F3, Bb2
+    root = roots[(chord_index + variant) % len(roots)]
+    chord = [_note_hz(root), _note_hz(root + 3), _note_hz(root + 7)]
+    bass_hz = _note_hz(root - 12)
+
+    if variant % 3 == 0:
+        kick_steps = {0, 6, 8, 11}
+        hat_division = 2
+    elif variant % 3 == 1:
+        kick_steps = {0, 3, 7, 10, 14}
+        hat_division = 1
+    else:
+        kick_steps = {0, 5, 8, 13}
+        hat_division = 2
+
+    step_seconds = bar_seconds / 16.0
+
+    for frame in range(frames):
+        t = frame / SAMPLE_RATE
+        step_float = t / step_seconds
+        step = int(step_float) % 16
+        within_step = (step_float - int(step_float)) * step_seconds
+
+        value_l = 0.0
+        value_r = 0.0
+
+        # Kick: short falling sine burst.
+        if step in kick_steps and within_step < 0.18:
+            e = math.exp(-within_step * 18.0)
+            freq = 95.0 - min(50.0, within_step * 260.0)
+            kick = math.sin(2.0 * math.pi * freq * within_step) * e * 0.55
+            value_l += kick
+            value_r += kick
+
+        # Snare/clap on 2 and 4, with a variant-specific ghost hit.
+        snare_steps = {4, 12}
+        if variant == 2:
+            snare_steps.add(15)
+        if step in snare_steps and within_step < 0.12:
+            e = math.exp(-within_step * 22.0)
+            noise = (rng.random() * 2.0 - 1.0) * e
+            body = math.sin(2.0 * math.pi * 185.0 * within_step) * e
+            snare = (noise * 0.26 + body * 0.18)
+            value_l += snare
+            value_r += snare
+
+        # Hats: generated subdivision, different for each preview.
+        if step % hat_division == 0 and within_step < 0.045:
+            e = math.exp(-within_step * 65.0)
+            hat = (rng.random() * 2.0 - 1.0) * e * 0.10
+            pan = -0.35 if (step // max(1, hat_division)) % 2 == 0 else 0.35
+            value_l += hat * (1.0 - max(0.0, pan))
+            value_r += hat * (1.0 + min(0.0, pan))
+
+        # Bass follows generated harmony, leaving more space around the backbeat.
+        beat_index = int(t / beat_seconds) % 4
+        beat_pos = (t / beat_seconds) - int(t / beat_seconds)
+        if beat_pos < 0.72 and beat_index in (0, 2, 3):
+            e = _env(beat_pos * beat_seconds, 0.015, beat_seconds * 0.72)
+            bass = math.sin(2.0 * math.pi * bass_hz * t) * e * 0.22
+            value_l += bass
+            value_r += bass
+
+        # Wide, restrained chord bed.
+        pad_env = 0.5 - 0.5 * math.cos(2.0 * math.pi * (t / bar_seconds))
+        for i, freq in enumerate(chord):
+            pad = math.sin(2.0 * math.pi * freq * t + i * 0.7) * 0.035 * pad_env
+            value_l += pad * (0.85 if i == 0 else 1.0)
+            value_r += pad * (0.85 if i == 2 else 1.0)
+
+        value_l = max(-0.95, min(0.95, value_l))
+        value_r = max(-0.95, min(0.95, value_r))
+        output.append(round(value_l * 32767))
+        output.append(round(value_r * 32767))
+
+    return output
+
+
+def _energy_at(curve: list[float], progress: float) -> float:
+    if not curve:
+        return 0.82
+    index = min(len(curve) - 1, max(0, int(progress * len(curve))))
+    value = curve[index]
+    # Avoid disappearing sections while preserving the reference energy shape.
+    return 0.48 + 0.52 * max(0.0, min(1.0, value))
+
+
+def synthesize_instrumental(
+    destination: str | Path,
+    duration: float,
+    bpm: float,
+    energy_curve: list[float],
+    variant: int = 0,
+) -> Path:
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(1.0, float(duration))
+    bpm = min(180.0, max(60.0, float(bpm or 90.0)))
+    bar_seconds = (60.0 / bpm) * 4.0
+    total_frames = round(duration * SAMPLE_RATE)
+
+    templates = [_bar_template(bpm, variant, chord) for chord in range(4)]
+    frames_written = 0
+    bar_index = 0
+
+    with wave.open(str(target), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+
+        while frames_written < total_frames:
+            template = templates[bar_index % len(templates)]
+            template_frames = len(template) // 2
+            take_frames = min(template_frames, total_frames - frames_written)
+            progress = frames_written / max(1, total_frames)
+            gain = _energy_at(energy_curve, progress)
+
+            block = array("h")
+            end = take_frames * 2
+            for sample in template[:end]:
+                block.append(max(-32768, min(32767, round(sample * gain))))
+            wav.writeframes(block.tobytes())
+
+            frames_written += take_frames
+            bar_index += 1
+
+    return target
