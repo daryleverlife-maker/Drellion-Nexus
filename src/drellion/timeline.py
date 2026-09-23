@@ -125,8 +125,8 @@ def render_timeline(project: ProjectState, target_path: str | Path) -> Path:
     filters: list[str] = []
     labels: list[str] = []
     for index, (track, clip) in enumerate(clips):
+        source_label = f"[{index}:a]"
         chain = [
-            f"[{index}:a]",
             f"atrim=start={clip.source_offset:.6f}"
             + (f":duration={clip.duration:.6f}" if clip.duration > 0 else ""),
             "asetpts=PTS-STARTPTS",
@@ -154,7 +154,7 @@ def render_timeline(project: ProjectState, target_path: str | Path) -> Path:
             chain.append(f"adelay={delay}|{delay}")
 
         label = f"clip{index}"
-        filters.append(",".join(chain) + f"[{label}]")
+        filters.append(source_label + ",".join(chain) + f"[{label}]")
         labels.append(f"[{label}]")
 
     filters.append(
