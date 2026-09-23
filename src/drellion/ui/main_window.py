@@ -6,7 +6,7 @@ from ..autosave import write_autosave
 from ..history import History
 from ..project import ProjectState
 from .theme import APP_QSS
-from .steps import VocalLyricsStep,ReferenceStep,SoundsStep,PreviewStep,BuildStep,MasterStep
+from .steps import VocalLyricsStep,ReferenceStep,SoundsStep,PreviewStep,BuildStep,MasterStep\nfrom .studio import StudioWindow
 
 class MainWindow(QMainWindow):
     STEP_TITLES=["1  Vocal & Lyrics","2  Reference","3  Sounds","4  Preview","5  Build","6  Master"]
@@ -19,7 +19,7 @@ class MainWindow(QMainWindow):
         top=QHBoxLayout(); brand=QLabel("DRELLION NEXUS"); brand.setStyleSheet("font-size:18pt;font-weight:700;letter-spacing:1px;"); top.addWidget(brand); top.addStretch()
         for text,cb in [("New",self.new_project),("Open",self.open_project),("Save",self.save_project),("Undo",self.undo),("Redo",self.redo)]:
             b=QPushButton(text); b.clicked.connect(cb); top.addWidget(b)
-        mode=QPushButton("AI AUTO"); mode.setObjectName("Primary"); top.addWidget(mode); studio=QPushButton("CUSTOM STUDIO"); top.addWidget(studio); outer.addLayout(top)
+        mode=QPushButton("AI AUTO"); mode.setObjectName("Primary"); top.addWidget(mode); studio=QPushButton("CUSTOM STUDIO"); studio.clicked.connect(self.open_studio); top.addWidget(studio); outer.addLayout(top)
         body=QHBoxLayout(); body.setSpacing(12)
         nav=QFrame(); nav.setObjectName("Card"); nav.setFixedWidth(230); nl=QVBoxLayout(nav); nl.setContentsMargins(12,14,12,14); self.nav_buttons=[]
         for i,title in enumerate(self.STEP_TITLES):
@@ -32,7 +32,7 @@ class MainWindow(QMainWindow):
         side=QFrame(); side.setObjectName("Card"); side.setFixedWidth(280); sl=QVBoxLayout(side); sl.addWidget(QLabel("PROJECT")); self.project_summary=QLabel(); self.project_summary.setWordWrap(True); self.project_summary.setObjectName("Muted"); sl.addWidget(self.project_summary); sl.addStretch(); body.addWidget(side); outer.addLayout(body,1)
         player=QFrame(); player.setObjectName("Card"); pl=QHBoxLayout(player); pl.addWidget(QLabel("PLAYER")); pl.addWidget(QPushButton("⏮")); pl.addWidget(QPushButton("▶ / ⏸")); pl.addWidget(QPushButton("■")); pl.addWidget(QLabel("00:00 / 00:00")); pl.addStretch(); pl.addWidget(QPushButton("A / B")); outer.addWidget(player)
         self.goto_step(0); self.refresh_summary()
-    def bind_shortcuts(self):
+    def open_studio(self):\n        self.studio_window=StudioWindow(self)\n        self.studio_window.show()\n\n    def bind_shortcuts(self):
         QShortcut(QKeySequence.Save,self,activated=self.save_project); QShortcut(QKeySequence.Open,self,activated=self.open_project); QShortcut(QKeySequence.Undo,self,activated=self.undo); QShortcut(QKeySequence.Redo,self,activated=self.redo)
     def snapshot(self,label): self.project.touch(); self.history.push(label,self.project); self.refresh_summary()
     def goto_step(self,index):
