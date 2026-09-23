@@ -150,13 +150,68 @@ def _phrase_regions(rms: list[float], frame_seconds: float = 0.05) -> list[tuple
     return regions
 
 
+def _coarse_pitch_track(decoded: DecodedMono, rms: list[float], frame_seconds: float = 0.05) -> list[tuple[float, float]]:
+    """Estimate a lightweight monophonic pitch contour from an isolated vocal.
+
+    This deliberately favors speed and robustness over note-level transcription.
+    A heavier Basic Pitch/pYIN backend can replace it without changing the engine contract.
+    """
+    samples = decoded.samples
+    frame_size = max(128, int(decoded.sample_rate * frame_seconds))
+    ordered = sorted(rms)
+    activity_threshold = max(
+        0.008,
+        ordered[max(0, int(len(ordered) * 0.35) - 1)] * 1.8 if ordered else 0.008,
+    )
+    track: list[tuple[float, float]] = []
+
+    # Analyze at 10 Hz rather than every sample frame.
+    stride_frames = max(1, round(0.10 / frame_seconds))
+    for rms_index in range(0, len(rms), stride_frames):
+        if rms[rms_index] < activity_threshold:
+            continue
+        start = rms_index * frame_size
+        block = samples[start:start + frame_size]
+        if len(block) < frame_size // 2:
+            continue
+
+        # Remove a simple DC estimate before counting zero crossings.
+        mean = sum(block) / len(block)
+        crossings = 0
+        previous = block[0] - mean
+        for sample in block[1:]:
+            current = sample - mean
+            if (previous <= 0 < current) or (previous >= 0 > current):
+                crossings += 1
+            previous = current
+
+        hz = crossings / (2.0 * (len(block) / decoded.sample_rate))
+        if 70.0 <= hz <= 700.0:
+            track.append((rms_index * frame_seconds, hz))
+    return track
+
+
+def dominant_vocal_pitch_class(track: list[tuple[float, float]]) -> int | None:
+    if not track:
+        return None
+    histogram = [0] * 12
+    for _, hz in track:
+        if hz <= 0:
+            continue
+        midi = round(69 + 12 * math.log2(hz / 440.0))
+        histogram[midi % 12] += 1
+    if not any(histogram):
+        return None
+    return max(range(12), key=histogram.__getitem__)
+
+
 def analyze_vocal_file(path: str | Path) -> VocalAnalysis:
     decoded = decode_mono(path)
     rms = _frame_rms(decoded)
     return VocalAnalysis(
         duration=decoded.duration,
         phrase_regions=_phrase_regions(rms),
-        pitch_track=[],
+        pitch_track=_coarse_pitch_track(decoded, rms),
     )
 
 
