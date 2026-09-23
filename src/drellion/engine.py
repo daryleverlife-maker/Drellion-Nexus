@@ -10,6 +10,7 @@ from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysi
 from .audio.render import master_audio, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
 from .lyrics import align_lyrics, to_lrc
+from .library import SoundLibrary, SoundPalette
 
 
 @dataclass
@@ -32,6 +33,34 @@ class NexusEngine:
         if not state.reference.path:
             raise ValueError("A reference track is required.")
         return analyze_reference_file(state.reference.path)
+
+    @staticmethod
+    def _reference_guidance(state: ProjectState, reference: ReferenceAnalysis, variant: int = 0) -> tuple[float, list[float]]:
+        influence = (state.reference_influence or "Strong").strip().lower()
+        influence_weight = {"light": 0.35, "balanced": 0.65, "strong": 1.0}.get(influence, 1.0)
+
+        reference_bpm = reference.bpm or 90.0
+        bpm = 90.0 + (reference_bpm - 90.0) * influence_weight
+
+        originality = (state.originality_protection or "Maximum").strip().lower()
+        variation = {"standard": 0.0, "high": 0.006, "maximum": 0.012}.get(originality, 0.012)
+        direction = (-1.0, 0.5, 1.0)[variant % 3]
+        bpm *= 1.0 + direction * variation
+
+        guided_energy = [
+            0.72 * (1.0 - influence_weight) + value * influence_weight
+            for value in (reference.energy_curve or [0.72] * 12)
+        ]
+        return max(60.0, min(180.0, bpm)), guided_energy
+
+    @staticmethod
+    def _palette(state: ProjectState, variant: int) -> SoundPalette:
+        root = (state.sound_library_path or "").strip()
+        if not root:
+            return SoundPalette()
+        library = SoundLibrary(root)
+        library.scan()
+        return library.pick_palette(variant)
 
     @staticmethod
     def _variant_from_selection(selection: str) -> int:
@@ -65,13 +94,16 @@ class NexusEngine:
         )
 
         for variant, name in enumerate(("Preview A", "Preview B", "Preview C")):
+            bpm, guided_energy = self._reference_guidance(state, reference, variant)
+            palette = self._palette(state, variant)
             instrumental = synthesize_instrumental(
                 out / f"preview-{variant + 1}-instrumental.wav",
                 preview_duration,
-                reference.bpm or 90.0,
-                reference.energy_curve,
+                bpm,
+                guided_energy,
                 variant=variant,
                 tonic_midi=tonic_midi,
+                sample_paths=palette.sample_paths(),
             )
             mixed = mix_vocal_and_instrumental(
                 state.vocal.path,
@@ -84,10 +116,14 @@ class NexusEngine:
                 ArrangementPreview(
                     name=name,
                     audio_path=str(mixed),
-                    description=descriptions[variant],
+                    description=(
+                        descriptions[variant]
+                        + (" Library drums are active." if palette.sample_paths() else " Synthetic fallback drums are active.")
+                    ),
                     similarity={
                         "reference_bpm": reference.bpm or 90.0,
-                        "energy_guidance": 1.0,
+                        "generated_bpm": bpm,
+                        "energy_guidance": {"Light": 0.35, "Balanced": 0.65, "Strong": 1.0}.get(state.reference_influence, 1.0),
                         "exact_reference_hits_reused": 0.0,
                     },
                 )
@@ -110,14 +146,17 @@ class NexusEngine:
         duration = max(1.0, vocal.duration)
         pitch_class = dominant_vocal_pitch_class(vocal.pitch_track)
         tonic_midi = 48 + (pitch_class if pitch_class is not None else 0)
+        bpm, guided_energy = self._reference_guidance(state, reference, variant)
+        palette = self._palette(state, variant)
 
         instrumental = synthesize_instrumental(
             out / "generated-instrumental.wav",
             duration,
-            reference.bpm or 90.0,
-            reference.energy_curve,
+            bpm,
+            guided_energy,
             variant=variant,
             tonic_midi=tonic_midi,
+            sample_paths=palette.sample_paths(),
         )
         build_path = mix_vocal_and_instrumental(
             state.vocal.path,
@@ -150,6 +189,10 @@ class NexusEngine:
                 "instrumental_is_newly_generated": True,
                 "vocal_pitch_class": pitch_class,
                 "generated_tonic_midi": tonic_midi,
+                "generated_bpm": bpm,
+                "reference_influence": state.reference_influence,
+                "originality_protection": state.originality_protection,
+                "sound_palette": palette.to_dict(),
             },
             "outputs": {
                 "instrumental": str(instrumental),
