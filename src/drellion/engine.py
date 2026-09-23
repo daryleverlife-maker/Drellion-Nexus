@@ -7,10 +7,11 @@ import json
 from .project import ProjectState
 from .audio.analysis import analyze_reference_file, analyze_vocal_file, dominant_vocal_pitch_class
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
-from .audio.render import master_audio, mix_vocal_and_instrumental
+from .audio.render import master_audio, mix_sfx_events, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
 from .lyrics import align_lyrics, to_lrc
 from .library import SoundLibrary, SoundPalette
+from .sfx import SfxSuggestion, suggest_sfx
 
 
 @dataclass
@@ -70,6 +71,15 @@ class NexusEngine:
         if text.endswith("c"):
             return 2
         return 0
+
+    def smart_sfx(self, state: ProjectState) -> list[SfxSuggestion]:
+        if not state.sound_library_path:
+            return []
+        vocal = self.analyze_vocal(state)
+        cues = align_lyrics(state.lyrics, vocal.phrase_regions, vocal.duration)
+        library = SoundLibrary(state.sound_library_path)
+        library.scan()
+        return suggest_sfx(cues, library)
 
     def generate_previews(
         self, state: ProjectState, output_dir: str | Path
@@ -149,15 +159,33 @@ class NexusEngine:
         bpm, guided_energy = self._reference_guidance(state, reference, variant)
         palette = self._palette(state, variant)
 
-        instrumental = synthesize_instrumental(
-            out / "generated-instrumental.wav",
-            duration,
-            bpm,
-            guided_energy,
-            variant=variant,
-            tonic_midi=tonic_midi,
-            sample_paths=palette.sample_paths(),
-        )
+        selected_sfx = list(state.settings.get("selected_sfx", []) or [])
+        if selected_sfx:
+            core_instrumental = synthesize_instrumental(
+                out / "generated-instrumental-core.wav",
+                duration,
+                bpm,
+                guided_energy,
+                variant=variant,
+                tonic_midi=tonic_midi,
+                sample_paths=palette.sample_paths(),
+            )
+            instrumental = mix_sfx_events(
+                core_instrumental,
+                selected_sfx,
+                out / "generated-instrumental.wav",
+            )
+        else:
+            instrumental = synthesize_instrumental(
+                out / "generated-instrumental.wav",
+                duration,
+                bpm,
+                guided_energy,
+                variant=variant,
+                tonic_midi=tonic_midi,
+                sample_paths=palette.sample_paths(),
+            )
+
         build_path = mix_vocal_and_instrumental(
             state.vocal.path,
             instrumental,
@@ -193,6 +221,8 @@ class NexusEngine:
                 "reference_influence": state.reference_influence,
                 "originality_protection": state.originality_protection,
                 "sound_palette": palette.to_dict(),
+                "selected_sfx_count": len(selected_sfx),
+                "selected_sfx": selected_sfx,
             },
             "outputs": {
                 "instrumental": str(instrumental),
