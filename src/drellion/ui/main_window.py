@@ -5,9 +5,10 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QMessageBox, QProgressDialog, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from ..auto import run_full_auto
 from ..autosave import autosave_path, write_autosave
 from ..engine import NexusEngine
 from ..history import History
@@ -18,6 +19,7 @@ from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
 from .studio import StudioWindow
+from .worker import FunctionThread
 
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
         self.history = History(self.project)
         self.engine = NexusEngine()
         self.current_step = 0
+        self._workers = []
 
         self.build_ui()
         self.build_menus()
@@ -79,9 +82,10 @@ class MainWindow(QMainWindow):
             button.clicked.connect(callback)
             top.addWidget(button)
 
-        mode = QPushButton("AI AUTO")
-        mode.setObjectName("Primary")
-        top.addWidget(mode)
+        self.auto_button = QPushButton("AI AUTO")
+        self.auto_button.setObjectName("Primary")
+        self.auto_button.clicked.connect(self.run_ai_auto)
+        top.addWidget(self.auto_button)
         studio = QPushButton("CUSTOM STUDIO")
         studio.clicked.connect(self.open_studio)
         top.addWidget(studio)
@@ -181,6 +185,81 @@ class MainWindow(QMainWindow):
         reset_action = QAction("Reset Project…", self)
         reset_action.triggered.connect(self.reset_project)
         edit_menu.addAction(reset_action)
+
+    def run_ai_auto(self):
+        if not self.project.vocal.path or not self.project.reference.path:
+            QMessageBox.information(
+                self,
+                "AI Auto",
+                "Load a vocal stem and a reference track first.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Run AI Auto",
+            "AI Auto will generate three arrangements, choose a direction, "
+            "optionally add lyric-aware SFX, build the full song and master it.\n\n"
+            "You can undo the result or continue editing it in Custom Studio. Continue?",
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        output = self.project_output_dir() / "Auto"
+        progress = QProgressDialog(
+            "Drellion Nexus is running the full AI Auto production…",
+            "",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("AI Auto")
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        self.auto_button.setEnabled(False)
+        worker = FunctionThread(run_full_auto, self.project, output, engine=self.engine)
+        self._workers.append(worker)
+
+        def cleanup():
+            self.auto_button.setEnabled(True)
+            progress.close()
+            if worker in self._workers:
+                self._workers.remove(worker)
+            worker.deleteLater()
+
+        def complete(result):
+            self.project = result.state
+            self.history.push("AI Auto complete", self.project)
+            preview_step = self.steps[3]
+            preview_step.preview_paths = {
+                item.name: item.audio_path for item in result.previews
+            }
+            for item in result.previews:
+                if item.name in preview_step.preview_descriptions:
+                    preview_step.preview_descriptions[item.name].setText(item.description)
+            preview_step._update_sfx_status()
+            self.sync_ui_from_project()
+            self.refresh_player_sources("Master")
+            self.goto_step(5)
+            cleanup()
+            QMessageBox.information(
+                self,
+                "AI Auto complete",
+                f"Selected: {result.chosen_preview}\n"
+                f"Build: {result.build.build_path}\n"
+                f"Master: {result.master_path}",
+            )
+
+        def failed(message):
+            cleanup()
+            QMessageBox.critical(self, "AI Auto failed", message)
+
+        worker.completed.connect(complete)
+        worker.failed.connect(failed)
+        worker.start()
 
     def open_studio(self):
         self.studio_window = StudioWindow(self)
