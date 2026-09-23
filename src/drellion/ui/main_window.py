@@ -2,22 +2,25 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from ..autosave import write_autosave
+from ..autosave import autosave_path, write_autosave
 from ..engine import NexusEngine
 from ..history import History
-from ..project import ProjectState
+from ..project import MediaSlot, ProjectState
 from .player import PlayerBar
 from .theme import APP_QSS
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
 from .studio import StudioWindow
+
+
+AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +39,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
         self.setMinimumSize(1040, 700)
         self.setStyleSheet(APP_QSS)
+        self.setAcceptDrops(True)
 
         self.project = ProjectState()
         self.project_path = None
@@ -44,6 +48,7 @@ class MainWindow(QMainWindow):
         self.current_step = 0
 
         self.build_ui()
+        self.build_menus()
         self.bind_shortcuts()
 
         self.autosave_timer = QTimer(self)
@@ -135,6 +140,48 @@ class MainWindow(QMainWindow):
         self.goto_step(0)
         self.refresh_summary()
 
+    def build_menus(self):
+        file_menu = self.menuBar().addMenu("&File")
+
+        actions = [
+            ("New Project", QKeySequence.New, self.new_project),
+            ("Open…", QKeySequence.Open, self.open_project),
+            ("Save", QKeySequence.Save, self.save_project),
+            ("Save As…", QKeySequence.SaveAs, self.save_project_as),
+            ("Save Copy…", None, self.save_copy),
+            ("Recover Autosave", None, self.recover_autosave),
+        ]
+        for title, shortcut, callback in actions:
+            action = QAction(title, self)
+            if shortcut:
+                action.setShortcut(shortcut)
+            action.triggered.connect(callback)
+            file_menu.addAction(action)
+        file_menu.addSeparator()
+        quit_action = QAction("Exit", self)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        edit_menu = self.menuBar().addMenu("&Edit")
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut(QKeySequence.Undo)
+        undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut(QKeySequence.Redo)
+        redo_action.triggered.connect(self.redo)
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+        clear_action = QAction("Clear Current Step", self)
+        clear_action.triggered.connect(self.clear_current_step)
+        edit_menu.addAction(clear_action)
+
+        reset_action = QAction("Reset Project…", self)
+        reset_action.triggered.connect(self.reset_project)
+        edit_menu.addAction(reset_action)
+
     def open_studio(self):
         self.studio_window = StudioWindow(self)
         self.studio_window.show()
@@ -196,12 +243,47 @@ class MainWindow(QMainWindow):
         if hasattr(self, "player"):
             self.refresh_player_sources()
 
+    def sync_ui_from_project(self):
+        if not getattr(self, "steps", None):
+            return
+
+        vocal = self.steps[0]
+        vocal.path.blockSignals(True)
+        vocal.lyrics.blockSignals(True)
+        vocal.preserve.blockSignals(True)
+        vocal.path.setText(self.project.vocal.path)
+        vocal.lyrics.setPlainText(self.project.lyrics)
+        vocal.preserve.setCurrentText(self.project.vocal_preservation)
+        vocal.path.blockSignals(False)
+        vocal.lyrics.blockSignals(False)
+        vocal.preserve.blockSignals(False)
+
+        reference = self.steps[1]
+        reference.path.setText(self.project.reference.path)
+
+        sounds = self.steps[2]
+        sounds.path.setText(self.project.sound_library_path)
+
+        master = self.steps[5]
+        target_lufs = float(self.project.settings.get("target_lufs", -14.0))
+        text = f"{int(target_lufs) if target_lufs.is_integer() else target_lufs:g} LUFS"
+        if master.target.findText(text) >= 0:
+            master.target.setCurrentText(text)
+
+        self.refresh_summary()
+
     def new_project(self):
         self.project = ProjectState()
         self.project_path = None
         self.history = History(self.project)
-        self.refresh_summary()
+        self.sync_ui_from_project()
         self.goto_step(0)
+
+    def load_project_path(self, path: str | Path):
+        self.project = ProjectState.load(path)
+        self.project_path = Path(path)
+        self.history = History(self.project)
+        self.sync_ui_from_project()
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -210,23 +292,52 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self.project = ProjectState.load(path)
-            self.project_path = Path(path)
-            self.history = History(self.project)
-            self.refresh_summary()
+            self.load_project_path(path)
         except Exception as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
 
     def save_project(self):
         if self.project_path is None:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Drellion Project", "", "Drellion Project (*.drellion)"
-            )
-            if not path:
-                return
-            self.project_path = Path(path)
+            return self.save_project_as()
         self.project_path = self.project.save(self.project_path)
         self.refresh_summary()
+
+    def save_project_as(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Drellion Project As", "", "Drellion Project (*.drellion)"
+        )
+        if not path:
+            return
+        self.project_path = self.project.save(path)
+        self.refresh_summary()
+
+    def save_copy(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project Copy", "", "Drellion Project (*.drellion)"
+        )
+        if not path:
+            return
+        original = self.project_path
+        self.project.save(path)
+        self.project_path = original
+        self.refresh_summary()
+
+    def recover_autosave(self):
+        path = autosave_path(
+            self.project_path,
+            Path.home() / "Drellion Nexus" / "Autosaves",
+        )
+        if not path.is_file():
+            QMessageBox.information(self, "Recover Autosave", "No autosave exists for this project.")
+            return
+        try:
+            recovered = ProjectState.load(path)
+            self.project = recovered
+            self.history = History(self.project)
+            self.sync_ui_from_project()
+            QMessageBox.information(self, "Recover Autosave", "Autosave restored into the current project.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Recover Autosave", str(exc))
 
     def autosave(self):
         try:
@@ -242,10 +353,97 @@ class MainWindow(QMainWindow):
         state = self.history.undo()
         if state is not None:
             self.project = state
-            self.refresh_summary()
+            self.sync_ui_from_project()
 
     def redo(self):
         state = self.history.redo()
         if state is not None:
             self.project = state
-            self.refresh_summary()
+            self.sync_ui_from_project()
+
+    def clear_current_step(self):
+        if self.current_step == 0:
+            self.project.vocal = MediaSlot()
+            self.project.lyrics = ""
+        elif self.current_step == 1:
+            self.project.reference = MediaSlot()
+        elif self.current_step == 2:
+            self.project.sound_library_path = ""
+            self.project.settings.pop("sound_count", None)
+        elif self.current_step == 3:
+            self.project.selected_preview = ""
+            self.steps[3].preview_paths.clear()
+        elif self.current_step == 4:
+            self.project.build_path = ""
+            self.project.settings.pop("generated_instrumental", None)
+            self.project.settings.pop("build_report", None)
+        elif self.current_step == 5:
+            self.project.master_path = ""
+        self.snapshot(f"Cleared step {self.current_step + 1}")
+        self.sync_ui_from_project()
+
+    def reset_project(self):
+        answer = QMessageBox.question(
+            self,
+            "Reset Project",
+            "Reset the project to defaults? Imported source files will not be deleted.",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.project = ProjectState()
+        self.history = History(self.project)
+        self.sync_ui_from_project()
+        self.goto_step(0)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        local_paths = [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()
+            if url.isLocalFile()
+        ]
+        if not local_paths:
+            return
+
+        path = local_paths[0]
+        try:
+            if path.suffix.lower() == ".drellion" and path.is_file():
+                self.load_project_path(path)
+                event.acceptProposedAction()
+                return
+
+            if path.is_dir():
+                if self.current_step == 2:
+                    self.project.sound_library_path = str(path)
+                    self.snapshot("Dropped sound library")
+                    self.sync_ui_from_project()
+                    self.steps[2].refresh()
+                event.acceptProposedAction()
+                return
+
+            if path.suffix.lower() in AUDIO_EXTENSIONS:
+                if self.current_step == 0:
+                    self.project.vocal = MediaSlot(str(path), path.name)
+                    preferred = "Vocal"
+                elif self.current_step == 1:
+                    self.project.reference = MediaSlot(str(path), path.name)
+                    preferred = "Reference"
+                elif not self.project.vocal.path:
+                    self.project.vocal = MediaSlot(str(path), path.name)
+                    preferred = "Vocal"
+                elif not self.project.reference.path:
+                    self.project.reference = MediaSlot(str(path), path.name)
+                    preferred = "Reference"
+                else:
+                    self.project.finished_song = MediaSlot(str(path), path.name)
+                    preferred = "Current"
+                    self.player.load_path(str(path), "Current")
+                self.snapshot(f"Dropped {preferred.lower()} audio")
+                self.sync_ui_from_project()
+                self.refresh_player_sources(preferred if preferred != "Current" else None)
+                event.acceptProposedAction()
+        except Exception as exc:
+            QMessageBox.critical(self, "Drop failed", str(exc))
