@@ -76,6 +76,22 @@ class SoundLibrary:
             )
         return self.items
 
+    def find_keywords(self, keywords: tuple[str, ...], limit: int = 100) -> list[SoundItem]:
+        if not self.items:
+            self.scan()
+        matches = self._matches(tuple(k.lower() for k in keywords if k))
+        return matches[:max(0, int(limit))]
+
+    def search(self, query: str, limit: int = 100) -> list[SoundItem]:
+        words = tuple(
+            word.strip().lower()
+            for word in query.replace("_", " ").replace("-", " ").split()
+            if word.strip()
+        )
+        if not words:
+            return self.items[:max(0, int(limit))]
+        return self.find_keywords(words, limit=limit)
+
     def _matches(self, keywords: tuple[str, ...]) -> list[SoundItem]:
         matches = []
         for item in self.items:
