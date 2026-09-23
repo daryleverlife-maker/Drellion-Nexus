@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 
 from .project import ProjectState
-from .audio.analysis import analyze_reference_file, analyze_vocal_file
+from .audio.analysis import analyze_reference_file, analyze_vocal_file, dominant_vocal_pitch_class
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
 from .audio.render import master_audio, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
@@ -54,6 +54,8 @@ class NexusEngine:
             vocal_start = max(0.0, vocal.phrase_regions[0][0] - 0.5)
 
         previews: list[ArrangementPreview] = []
+        pitch_class = dominant_vocal_pitch_class(vocal.pitch_track)
+        tonic_midi = 48 + (pitch_class if pitch_class is not None else 0)
         descriptions = (
             "Punch-first: fewer kicks, wider spaces, restrained hats.",
             "Drive-first: denser kick movement and more active hats.",
@@ -67,6 +69,7 @@ class NexusEngine:
                 reference.bpm or 90.0,
                 reference.energy_curve,
                 variant=variant,
+                tonic_midi=tonic_midi,
             )
             mixed = mix_vocal_and_instrumental(
                 state.vocal.path,
@@ -103,6 +106,8 @@ class NexusEngine:
 
         variant = self._variant_from_selection(state.selected_preview)
         duration = max(1.0, vocal.duration)
+        pitch_class = dominant_vocal_pitch_class(vocal.pitch_track)
+        tonic_midi = 48 + (pitch_class if pitch_class is not None else 0)
 
         instrumental = synthesize_instrumental(
             out / "generated-instrumental.wav",
@@ -110,6 +115,7 @@ class NexusEngine:
             reference.bpm or 90.0,
             reference.energy_curve,
             variant=variant,
+            tonic_midi=tonic_midi,
         )
         build_path = mix_vocal_and_instrumental(
             state.vocal.path,
@@ -128,6 +134,8 @@ class NexusEngine:
                 "reference_exact_onsets_copied": False,
                 "reference_melody_copied": False,
                 "instrumental_is_newly_generated": True,
+                "vocal_pitch_class": pitch_class,
+                "generated_tonic_midi": tonic_midi,
             },
             "outputs": {
                 "instrumental": str(instrumental),
