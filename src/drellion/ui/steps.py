@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QFileDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QMessageBox, QPushButton, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from ..exporter import PRESETS, export_audio
 from ..library import SoundLibrary
+from ..metadata import TrackMetadata, embed_metadata
 
 
 AUDIO_FILTER = "Audio (*.wav *.flac *.mp3 *.m4a *.aac *.ogg *.opus *.aiff *.aif *.wma)"
@@ -379,6 +381,7 @@ class BuildStep(StepBase):
             self.window.project.build_path = result.build_path
             self.window.project.settings["generated_instrumental"] = result.instrumental_path
             self.window.project.settings["build_report"] = result.report_path
+            self.window.project.settings["lyrics_lrc"] = result.lyric_path
             self.window.snapshot("Built song")
             self.window.refresh_player_sources("Build")
             self.status.setText("Build complete.")
@@ -420,6 +423,21 @@ class MasterStep(StepBase):
         self.format.addItems(PRESETS.keys())
         export_card.addWidget(QLabel("Format"))
         export_card.addWidget(self.format)
+
+        self.meta_title = QLineEdit()
+        self.meta_title.setPlaceholderText("Song title")
+        self.meta_title.setText(window.project.name if window.project.name != "Untitled" else "")
+        self.meta_artist = QLineEdit()
+        self.meta_artist.setPlaceholderText("Artist")
+        self.meta_album = QLineEdit()
+        self.meta_album.setPlaceholderText("Album (optional)")
+        self.embed_lyrics = QCheckBox("Embed project lyrics when supported")
+        self.embed_lyrics.setChecked(True)
+        export_card.addWidget(self.meta_title)
+        export_card.addWidget(self.meta_artist)
+        export_card.addWidget(self.meta_album)
+        export_card.addWidget(self.embed_lyrics)
+
         export_button = QPushButton("Export…")
         export_button.clicked.connect(self.export)
         export_card.addWidget(export_button)
@@ -463,7 +481,31 @@ class MasterStep(StepBase):
         try:
             self.busy(True)
             output = export_audio(source, target, self.format.currentText())
-            QMessageBox.information(self, "Export complete", str(output))
+            lyrics = self.window.project.lyrics if self.embed_lyrics.isChecked() else ""
+            metadata = TrackMetadata(
+                title=self.meta_title.text().strip(),
+                artist=self.meta_artist.text().strip(),
+                album=self.meta_album.text().strip(),
+                lyrics=lyrics,
+            )
+            warnings = embed_metadata(output, metadata)
+
+            lrc_source = self.window.project.settings.get("lyrics_lrc", "")
+            if self.embed_lyrics.isChecked() and lrc_source and Path(lrc_source).is_file():
+                shutil.copy2(lrc_source, Path(output).with_suffix(".lrc"))
+
+            self.window.project.settings["export_metadata"] = {
+                "title": metadata.title,
+                "artist": metadata.artist,
+                "album": metadata.album,
+                "embed_lyrics": self.embed_lyrics.isChecked(),
+            }
+            self.window.snapshot("Exported track")
+
+            message = str(output)
+            if warnings:
+                message += "\n\n" + "\n".join(warnings)
+            QMessageBox.information(self, "Export complete", message)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
         finally:
