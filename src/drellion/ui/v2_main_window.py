@@ -77,9 +77,10 @@ class V2MainWindow(QMainWindow):
         self._sync()
         self.history.push(label, self.project)
 
-    def _replace_project(self, project: ProjectState):
+    def _replace_project(self, project: ProjectState, reset_history: bool = True):
         self.project = project
-        self.history = History(self.project)
+        if reset_history:
+            self.history = History(self.project)
         old = self.workspace
         self.workspace = V2Workspace(self.project, self.storage, self.accessibility, self)
         self.workspace.open_project_requested.connect(self.load_project_path)
@@ -139,12 +140,12 @@ class V2MainWindow(QMainWindow):
     def undo(self):
         state = self.history.undo()
         if state is not None:
-            self._replace_project(state)
+            self._replace_project(state, reset_history=False)
 
     def redo(self):
         state = self.history.redo()
         if state is not None:
-            self._replace_project(state)
+            self._replace_project(state, reset_history=False)
 
     def clear_generated(self):
         self.checkpoint("Before clearing generated outputs")
@@ -153,7 +154,7 @@ class V2MainWindow(QMainWindow):
         self.project.master_path = ""
         for key in ("selected_preview_seed","selected_preview_provider","selected_preview_path","build_provider","build_report","master_report","generated_stems"):
             self.project.settings.pop(key, None)
-        self._replace_project(self.project)
+        self._replace_project(self.project, reset_history=False)
 
     def reset_project(self):
         answer = QMessageBox.question(self, "Reset Project", "Reset the project to defaults? Imported files on disk will not be deleted.")
