@@ -59,10 +59,17 @@ class NexusEngine:
     @staticmethod
     def _reference_guidance(state: ProjectState, reference: ReferenceAnalysis, variant: int = 0) -> tuple[float, list[float]]:
         influence = (state.reference_influence or "Strong").strip().lower()
-        influence_weight = {"light": 0.35, "balanced": 0.65, "strong": 1.0}.get(influence, 1.0)
+        preset_weight = {"light": 0.35, "balanced": 0.65, "strong": 1.0}.get(influence, 1.0)
+
+        custom_overall = float(state.settings.get("reference_strength", round(preset_weight * 100))) / 100.0
+        custom_groove = float(state.settings.get("groove_strength", round(custom_overall * 100))) / 100.0
+        custom_energy = float(state.settings.get("energy_strength", round(custom_overall * 100))) / 100.0
+        overall = max(0.0, min(1.0, custom_overall))
+        groove_weight = max(0.0, min(1.0, custom_groove))
+        energy_weight = max(0.0, min(1.0, custom_energy))
 
         reference_bpm = reference.bpm or 90.0
-        bpm = 90.0 + (reference_bpm - 90.0) * influence_weight
+        bpm = 90.0 + (reference_bpm - 90.0) * groove_weight
 
         originality = (state.originality_protection or "Maximum").strip().lower()
         variation = {"standard": 0.0, "high": 0.006, "maximum": 0.012}.get(originality, 0.012)
@@ -70,9 +77,12 @@ class NexusEngine:
         bpm *= 1.0 + direction * variation
 
         guided_energy = [
-            0.72 * (1.0 - influence_weight) + value * influence_weight
+            0.72 * (1.0 - energy_weight) + value * energy_weight
             for value in (reference.energy_curve or [0.72] * 12)
         ]
+        state.settings["effective_reference_strength"] = round(overall, 4)
+        state.settings["effective_groove_strength"] = round(groove_weight, 4)
+        state.settings["effective_energy_strength"] = round(energy_weight, 4)
         return max(60.0, min(180.0, bpm)), guided_energy
 
     @staticmethod
@@ -293,6 +303,9 @@ class NexusEngine:
             source_analysis=source_analysis,
             reference_analysis=reference_analysis,
             reference_influence=state.reference_influence,
+            custom_reference_strength=float(state.settings.get("master_reference_strength", 70.0)) / 100.0,
+            custom_punch=float(state.settings.get("master_punch", 50.0)) / 100.0,
+            custom_width=float(state.settings.get("master_width", 50.0)) / 100.0,
         )
 
         report = {
