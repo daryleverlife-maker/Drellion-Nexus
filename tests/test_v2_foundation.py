@@ -70,3 +70,11 @@ def test_engine_broker_uses_ready_provider():
     broker.register(missing)
     broker.register(ready)
     assert broker.choose("auto").id == "ready"
+
+
+def test_project_file_load_path_is_stable(tmp_path: Path):
+    project = ProjectState(name="Recent Project")
+    path = project.save(tmp_path / "recent.drellion")
+    loaded = ProjectState.load(path)
+    assert loaded.name == "Recent Project"
+    assert loaded.schema_version == 3
