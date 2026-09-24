@@ -347,7 +347,13 @@ class DirectionPage(QWidget):
         super().__init__(parent); self.project = project
         form = QFormLayout(self)
         title = QLabel("3  DIRECTION"); title.setObjectName("PageTitle"); form.addRow(title)
-        self.engine = QComboBox(); self.engine.addItems(["Automatic", "ACE-Step Online", "ACE-Step Local", "DiffRhythm Online", "DiffRhythm Local", "YuE", "Basic Test Engine"])
+        self.engine = QComboBox()
+        self.engine.addItem("Automatic", "auto")
+        self.engine.addItem("ACE-Step 1.5 (HTTP / local server / remote server)", "ace-step-http")
+        self.engine.addItem("DiffRhythm 2 Local", "diffrhythm-local")
+        saved_engine = str(project.settings.get("engine_id", "auto"))
+        saved_index = self.engine.findData(saved_engine)
+        if saved_index >= 0: self.engine.setCurrentIndex(saved_index)
         self.reference = QSlider(Qt.Horizontal); self.reference.setRange(0,100); self.reference.setValue(int(project.settings.get("reference_strength", 80)))
         self.vocal = QComboBox(); self.vocal.addItems(["Natural", "Polished", "Flexible"]); self.vocal.setCurrentText(project.vocal_preservation)
         self.style = QTextEdit(); self.style.setPlaceholderText("Describe the production direction: anthemic, dark, cinematic, punchy drums, sparse verse...")
@@ -357,7 +363,7 @@ class DirectionPage(QWidget):
         form.addRow("Production direction", self.style)
 
     def sync(self):
-        self.project.settings["engine"] = self.engine.currentText()
+        self.project.settings["engine_id"] = self.engine.currentData()
         self.project.settings["reference_strength"] = self.reference.value()
         self.project.settings["production_direction"] = self.style.toPlainText()
         self.project.vocal_preservation = self.vocal.currentText()
