@@ -28,8 +28,14 @@ def newer_autosave(project_path, recovery_root):
     if not saved.is_file():
         return target
     try:
-        return target if target.stat().st_mtime > saved.stat().st_mtime else None
-    except OSError:
+        if target.stat().st_mtime <= saved.stat().st_mtime:
+            return None
+        saved_payload = json.loads(saved.read_text(encoding="utf-8"))
+        recovery_payload = json.loads(target.read_text(encoding="utf-8"))
+        saved_payload.pop("updated_at", None)
+        recovery_payload.pop("updated_at", None)
+        return target if saved_payload != recovery_payload else None
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
 
 
