@@ -14,6 +14,7 @@ from ..project import ProjectState, SourceAsset, ReferenceAsset
 from ..storage import StorageSettings
 from ..production_v2 import generate_three_previews, build_full_song, create_broker
 from ..health import check_project
+from ..export_v2 import ExportPlan, export_project
 from .player import PlayerBar
 from .worker import FunctionThread
 from .theme import stylesheet_for
@@ -403,94 +404,60 @@ class StoragePage(QWidget):
 
 class ExportPage(QWidget):
     def __init__(self, project: ProjectState, parent=None):
-        super().__init__(parent); self.project=project
+        super().__init__(parent); self.project=project; self._workers=[]
         root=QVBoxLayout(self)
         title=QLabel("EXPORT CENTER"); title.setObjectName("PageTitle"); root.addWidget(title)
-        song=QGroupBox("Song"); sl=QHBoxLayout(song)
-        for label in ("Master WAV","MP3","FLAC","M4A","MP4 Video"):
-            box=QCheckBox(label); box.setChecked(label in ("Master WAV","MP3")); sl.addWidget(box)
+
+        song=QGroupBox("Song formats"); sl=QHBoxLayout(song)
+        self.formats={}
+        for key,label,checked in (("wav","Master WAV",True),("mp3","MP3",True),("flac","FLAC",False),("m4a","M4A",False),("mp4","MP4 Video",False)):
+            box=QCheckBox(label); box.setChecked(checked); self.formats[key]=box; sl.addWidget(box)
         root.addWidget(song)
-        stems=QGroupBox("Stems"); st=QHBoxLayout(stems)
-        for label in ("Vocal","Drums","Bass","Music","SFX","Instrumental"):
-            box=QCheckBox(label); box.setChecked(True); st.addWidget(box)
-        root.addWidget(stems)
-        other=QGroupBox("Other"); ot=QHBoxLayout(other)
-        for label in ("Lyrics LRC","Lyrics SRT","Project Archive","MIDI","Metadata"):
-            box=QCheckBox(label); box.setChecked(label != "MIDI"); ot.addWidget(box)
-        root.addWidget(other)
+
+        options=QGroupBox("Package"); ol=QHBoxLayout(options)
+        self.stems=QCheckBox("Stems"); self.stems.setChecked(True)
+        self.lrc=QCheckBox("Lyrics LRC"); self.lrc.setChecked(True)
+        self.srt=QCheckBox("Lyrics SRT")
+        self.archive=QCheckBox("Project Archive")
+        for box in (self.stems,self.lrc,self.srt,self.archive): ol.addWidget(box)
+        root.addWidget(options)
+
+        row=QHBoxLayout()
         self.location=QLineEdit(project.export_root); self.location.setPlaceholderText("Export folder")
-        root.addWidget(self.location)
-        root.addWidget(QPushButton("EXPORT ALL"),0,Qt.AlignLeft)
-        root.addStretch(1)
+        browse=QPushButton("Browse"); browse.clicked.connect(self._browse)
+        row.addWidget(self.location,1); row.addWidget(browse); root.addLayout(row)
 
+        self.status=QLabel("Ready."); root.addWidget(self.status)
+        self.button=QPushButton("EXPORT ALL"); self.button.setObjectName("Primary"); self.button.clicked.connect(self.export)
+        root.addWidget(self.button,0,Qt.AlignLeft); root.addStretch(1)
 
-class EnginesPage(QWidget):
-    def __init__(self, project: ProjectState, parent=None):
-        super().__init__(parent); self.project = project
-        root = QVBoxLayout(self)
-        title = QLabel("AI ENGINES"); title.setObjectName("PageTitle"); root.addWidget(title)
-        info = QLabel("Configure generation providers. Drellion never silently switches to the Basic Test Engine.")
-        info.setWordWrap(True); root.addWidget(info)
+    def _browse(self):
+        path=QFileDialog.getExistingDirectory(self,"Choose export folder",self.location.text())
+        if path: self.location.setText(path)
 
-        ace = QGroupBox("ACE-Step 1.5 HTTP")
-        form = QFormLayout(ace)
-        self.ace_endpoint = QLineEdit(str(project.settings.get("ace_step_endpoint", "")))
-        self.ace_endpoint.setPlaceholderText("http://127.0.0.1:8001 or your remote endpoint")
-        self.ace_key = QLineEdit(str(project.settings.get("ace_step_api_key", "")))
-        self.ace_key.setEchoMode(QLineEdit.Password)
-        form.addRow("Endpoint", self.ace_endpoint); form.addRow("API key", self.ace_key)
-        root.addWidget(ace)
+    def export(self):
+        destination=self.location.text().strip() or self.project.ensure_layout()["exports"]
+        self.project.export_root=str(destination)
+        formats=[key for key,box in self.formats.items() if box.isChecked()]
+        if not formats:
+            QMessageBox.information(self,"Export","Choose at least one song format.")
+            return
+        plan=ExportPlan(formats=formats,export_stems=self.stems.isChecked(),lyrics_lrc=self.lrc.isChecked(),lyrics_srt=self.srt.isChecked(),project_archive=self.archive.isChecked())
+        self.button.setEnabled(False); self.status.setText("Exporting…")
+        worker=FunctionThread(export_project,self.project,destination,plan); self._workers.append(worker)
+        worker.completed.connect(lambda outputs,w=worker:self._complete(outputs,w))
+        worker.failed.connect(lambda message,w=worker:self._failed(message,w)); worker.start()
 
-        local = QGroupBox("Local Engines")
-        lf = QFormLayout(local)
-        self.ace_local = QLineEdit(str(project.settings.get("ace_step_local_command", "")))
-        self.diff_local = QLineEdit(str(project.settings.get("diffrhythm_local_command", "")))
-        lf.addRow("ACE-Step command", self.ace_local); lf.addRow("DiffRhythm command", self.diff_local)
-        root.addWidget(local)
+    def _complete(self,outputs,worker):
+        self.button.setEnabled(True); self.status.setText(f"Exported {len(outputs)} files to {self.project.export_root}")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
 
-        self.status = QListWidget(); root.addWidget(self.status)
-        row = QHBoxLayout()
-        save = QPushButton("Save Engine Settings"); save.clicked.connect(self.sync)
-        test = QPushButton("Refresh Status"); test.clicked.connect(self.refresh_status)
-        row.addWidget(save); row.addWidget(test); row.addStretch(1); root.addLayout(row)
-        root.addStretch(1)
-
-    def sync(self):
-        self.project.settings["ace_step_endpoint"] = self.ace_endpoint.text().strip()
-        self.project.settings["ace_step_api_key"] = self.ace_key.text()
-        self.project.settings["ace_step_local_command"] = self.ace_local.text().strip()
-        self.project.settings["diffrhythm_local_command"] = self.diff_local.text().strip()
-        self.project.touch()
-        self.refresh_status()
-
-    def refresh_status(self):
-        self.status.clear()
-        try:
-            broker = create_broker(self.project)
-            statuses = broker.statuses()
-            if not statuses:
-                self.status.addItem("No engines configured.")
-            for item in statuses:
-                self.status.addItem(f"{item.name}: {item.state.value.upper()} — {item.detail}")
-        except Exception as exc:
-            self.status.addItem(f"Engine status error: {exc}")
-
-
-class HealthPage(QWidget):
-    def __init__(self, project: ProjectState, parent=None):
-        super().__init__(parent); self.project = project
-        root = QVBoxLayout(self)
-        title = QLabel("PROJECT HEALTH"); title.setObjectName("PageTitle"); root.addWidget(title)
-        self.list = QListWidget(); root.addWidget(self.list)
-        button = QPushButton("Run Project Check"); button.clicked.connect(self.refresh)
-        root.addWidget(button, 0, Qt.AlignLeft); root.addStretch(1)
-        self.refresh()
-
-    def refresh(self):
-        self.list.clear()
-        for item in check_project(self.project):
-            prefix = "✓" if item.ok else "⚠"
-            self.list.addItem(f"{prefix} {item.name}: {item.detail}")
+    def _failed(self,message,worker):
+        self.button.setEnabled(True); self.status.setText("Export failed.")
+        QMessageBox.critical(self,"Export failed",message)
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
 
 
 class V2Workspace(QWidget):
