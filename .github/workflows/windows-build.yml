@@ -74,7 +74,7 @@ jobs:
       - name: Package portable build
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\DrellionNexus\*" -DestinationPath "Drellion-Nexus-Portable.zip" -Force
+          Compress-Archive -Path "dist\DrellionNexus\*" -DestinationPath "Drellion-Nexus-v2-Portable.zip" -Force
 
       - name: Install Inno Setup
         shell: pwsh
@@ -84,13 +84,13 @@ jobs:
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\DrellionNexus.iss"
-          if (!(Test-Path "installer-output\Drellion-Nexus-Setup.exe")) { throw "Installer was not created." }
+          if (!(Test-Path "installer-output\Drellion-Nexus-v2-Setup.exe")) { throw "Installer was not created." }
 
       - name: Checksums
         shell: pwsh
         run: |
           if (Test-Path "checksums.sha256") { Remove-Item "checksums.sha256" -Force }
-          $files = @("Drellion-Nexus-Portable.zip", "installer-output\Drellion-Nexus-Setup.exe")
+          $files = @("Drellion-Nexus-v2-Portable.zip", "installer-output\Drellion-Nexus-v2-Setup.exe")
           foreach ($file in $files) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
             "$hash  $file" | Out-File -FilePath checksums.sha256 -Append -Encoding ascii
@@ -99,23 +99,23 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Installer
-          path: installer-output/Drellion-Nexus-Setup.exe
+          name: Drellion-Nexus-v2-Installer
+          path: installer-output/Drellion-Nexus-v2-Setup.exe
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Portable
-          path: Drellion-Nexus-Portable.zip
+          name: Drellion-Nexus-v2-Portable
+          path: Drellion-Nexus-v2-Portable.zip
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Checksums
+          name: Drellion-Nexus-v2-Checksums
           path: checksums.sha256
           if-no-files-found: error
           retention-days: 14
