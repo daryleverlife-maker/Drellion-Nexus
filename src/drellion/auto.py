@@ -22,11 +22,12 @@ def _choose_preview(previews: list[ArrangementPreview]) -> ArrangementPreview:
     if not previews:
         raise ValueError("No arrangement previews were generated.")
 
-    def score(preview: ArrangementPreview) -> tuple[float, str]:
+    def score(preview: ArrangementPreview) -> tuple[float, float, str]:
+        qc = float(preview.similarity.get("qc_score", 0.0) or 0.0)
         reference_bpm = float(preview.similarity.get("reference_bpm", 0.0) or 0.0)
         generated_bpm = float(preview.similarity.get("generated_bpm", 0.0) or 0.0)
         bpm_distance = abs(reference_bpm - generated_bpm)
-        return bpm_distance, preview.name
+        return (-qc, bpm_distance, preview.name)
 
     return min(previews, key=score)
 
