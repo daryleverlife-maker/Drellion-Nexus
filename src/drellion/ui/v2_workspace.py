@@ -18,6 +18,9 @@ from ..export_v2 import ExportPlan, export_project
 from ..versions import create_snapshot, list_snapshots
 from ..stems import available_stem_engines
 from ..youtube import fetch_oembed
+from ..library import SoundLibrary
+from ..master_v2 import master_v2
+from .studio import StudioWindow
 from .player import PlayerBar
 from .worker import FunctionThread
 from .theme import stylesheet_for
@@ -517,6 +520,114 @@ class StoragePage(QWidget):
             setattr(self.storage, key, edit.text().strip())
 
 
+class MasterPage(QWidget):
+    play_requested = Signal(str, str)
+
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project=project; self._workers=[]
+        root=QVBoxLayout(self)
+        title=QLabel("6  MASTER"); title.setObjectName("PageTitle"); root.addWidget(title)
+        form=QFormLayout()
+        self.lufs=QComboBox(); self.lufs.addItems(["-14","-12","-10","-9","-8"]); self.lufs.setCurrentText(str(project.settings.get("target_lufs",-14)))
+        self.punch=QSlider(Qt.Horizontal); self.punch.setRange(0,100); self.punch.setValue(int(project.settings.get("master_punch",50)))
+        self.width=QSlider(Qt.Horizontal); self.width.setRange(0,100); self.width.setValue(int(project.settings.get("master_width",50)))
+        self.ref=QSlider(Qt.Horizontal); self.ref.setRange(0,100); self.ref.setValue(int(project.settings.get("master_reference_strength",70)))
+        form.addRow("Target LUFS",self.lufs); form.addRow("Punch",self.punch); form.addRow("Width",self.width); form.addRow("Reference match",self.ref)
+        root.addLayout(form)
+        self.status=QLabel("Ready when a build or finished song exists."); root.addWidget(self.status)
+        row=QHBoxLayout()
+        master=QPushButton("Master Track"); master.setObjectName("Primary"); master.clicked.connect(self.master)
+        self.play=QPushButton("Play Master"); self.play.setEnabled(bool(project.master_path)); self.play.clicked.connect(self.play_master)
+        row.addWidget(master); row.addWidget(self.play); row.addStretch(1); root.addLayout(row); root.addStretch(1)
+        self.master_button=master
+
+    def master(self):
+        self.project.settings["target_lufs"]=float(self.lufs.currentText())
+        self.project.settings["master_punch"]=self.punch.value()
+        self.project.settings["master_width"]=self.width.value()
+        self.project.settings["master_reference_strength"]=self.ref.value()
+        self.master_button.setEnabled(False); self.status.setText("Mastering with blended references…")
+        out=self.project.ensure_layout()["masters"]
+        worker=FunctionThread(master_v2,self.project,out); self._workers.append(worker)
+        worker.completed.connect(lambda path,w=worker:self._complete(path,w))
+        worker.failed.connect(lambda message,w=worker:self._failed(message,w)); worker.start()
+
+    def _complete(self,path,worker):
+        self.master_button.setEnabled(True); self.play.setEnabled(True); self.status.setText(f"Master ready: {Path(path).name}")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _failed(self,message,worker):
+        self.master_button.setEnabled(True); self.status.setText("Master failed.")
+        QMessageBox.critical(self,"Master failed",message)
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+
+    def play_master(self):
+        if self.project.master_path:self.play_requested.emit("Master",self.project.master_path)
+
+
+class StudioLauncherPage(QWidget):
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project=project; self.studio=None
+        root=QVBoxLayout(self)
+        title=QLabel("CUSTOM STUDIO"); title.setObjectName("PageTitle"); root.addWidget(title)
+        text=QLabel("Open the multitrack non-destructive Studio for clips, tracks, fades, gain, pan, mute/solo, splitting and rendered mixes.")
+        text.setWordWrap(True); root.addWidget(text)
+        button=QPushButton("Open Studio"); button.setObjectName("Primary"); button.clicked.connect(self.open_studio); root.addWidget(button,0,Qt.AlignLeft)
+        root.addStretch(1)
+
+    def open_studio(self):
+        main=self.window()
+        if not hasattr(main,"project"):
+            QMessageBox.warning(self,"Studio","Project context unavailable.")
+            return
+        self.studio=StudioWindow(main); self.studio.show()
+
+
+class LibraryPage(QWidget):
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project=project; self.library=None
+        root=QVBoxLayout(self)
+        title=QLabel("SOUND LIBRARY"); title.setObjectName("PageTitle"); root.addWidget(title)
+        row=QHBoxLayout()
+        self.path=QLineEdit(project.sound_library_path); self.path.setPlaceholderText("Sound library folder")
+        browse=QPushButton("Browse"); browse.clicked.connect(self._browse)
+        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        row.addWidget(self.path,1); row.addWidget(browse); row.addWidget(refresh); root.addLayout(row)
+        searchrow=QHBoxLayout()
+        self.search=QLineEdit(); self.search.setPlaceholderText("Search sounds")
+        searchbutton=QPushButton("Search"); searchbutton.clicked.connect(self.run_search)
+        searchrow.addWidget(self.search,1); searchrow.addWidget(searchbutton); root.addLayout(searchrow)
+        self.status=QLabel("Choose or refresh a library."); root.addWidget(self.status)
+        self.list=QListWidget(); root.addWidget(self.list,1)
+
+    def _browse(self):
+        path=QFileDialog.getExistingDirectory(self,"Choose sound library",self.path.text())
+        if path:self.path.setText(path); self.refresh()
+
+    def refresh(self):
+        root=self.path.text().strip()
+        if not root:return
+        self.project.sound_library_path=root
+        self.library=SoundLibrary(root)
+        items=self.library.scan()
+        self.project.settings["sound_count"]=len(items)
+        self.project.touch()
+        self._show(items)
+        self.status.setText(f"{len(items):,} sounds indexed.")
+
+    def run_search(self):
+        if self.library is None:self.refresh()
+        if self.library is None:return
+        items=self.library.search(self.search.text(),limit=500)
+        self._show(items); self.status.setText(f"{len(items):,} matches.")
+
+    def _show(self,items):
+        self.list.clear()
+        for item in items[:500]:self.list.addItem(f"{item.name}  [{item.extension}]")
+
+
 class ExportPage(QWidget):
     def __init__(self, project: ProjectState, parent=None):
         super().__init__(parent); self.project=project; self._workers=[]
@@ -611,9 +722,9 @@ class V2Workspace(QWidget):
         self.stack.addWidget(self.direction)
         self.previews = PreviewsPage(project); self.previews.play_requested.connect(self.play_audio); self.stack.addWidget(self.previews)
         self.build_page = BuildPage(project); self.build_page.play_requested.connect(self.play_audio); self.stack.addWidget(self.build_page)
-        self.stack.addWidget(PlaceholderPage("6  MASTER", "Reference-aware mastering with loudness, true peak, tonal balance, width and volume-matched A/B.", ["Master Track"]))
-        self.stack.addWidget(PlaceholderPage("STUDIO", "Timeline + browser + inspector + mixer + Ask Drellion command bar. Existing v1 Studio remains available while the v2 workspace is expanded."))
-        self.stack.addWidget(PlaceholderPage("LIBRARY", "Soundbank, stems, SFX, MIDI, favourites, search, tags and user folders. Refresh detects new user-added sounds."))
+        self.master_page=MasterPage(project); self.master_page.play_requested.connect(self.play_audio); self.stack.addWidget(self.master_page)
+        self.studio_page=StudioLauncherPage(project); self.stack.addWidget(self.studio_page)
+        self.library_page=LibraryPage(project); self.stack.addWidget(self.library_page)
         self.stack.addWidget(ExportPage(project))
         self.versions_page=VersionsPage(project); self.stack.addWidget(self.versions_page)
         self.storage_page=StoragePage(storage); self.stack.addWidget(self.storage_page)
