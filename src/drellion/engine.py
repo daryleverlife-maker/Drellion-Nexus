@@ -123,38 +123,45 @@ class NexusEngine:
                 return self.analyze_reference(state)
             return ReferenceAnalysis(bpm=90.0, energy_curve=[0.72] * 12)
 
-        analyses: list[tuple[float, ReferenceAnalysis]] = []
+        analyses = []
         for item in references:
             analysis = self.analyze_mix(item.path)
             item.analysis = asdict(analysis)
-            analyses.append((max(0.01, float(item.influence)), analysis))
+            analyses.append((item, analysis))
 
-        total = sum(weight for weight, _ in analyses) or 1.0
-        bpm_values = [(weight, a.bpm) for weight, a in analyses if a.bpm > 0]
-        bpm_total = sum(weight for weight, _ in bpm_values) or 1.0
-        bpm = sum(weight * value for weight, value in bpm_values) / bpm_total if bpm_values else 90.0
+        def weight(item, role: str) -> float:
+            return max(0.0, float(item.influence)) * max(0.0, float(item.roles.get(role, 1.0)))
+
+        bpm_pairs = [
+            (weight(item, 'drums'), analysis.bpm)
+            for item, analysis in analyses
+            if analysis.bpm > 0 and weight(item, 'drums') > 0
+        ]
+        bpm_total = sum(w for w, _ in bpm_pairs)
+        bpm = sum(w * value for w, value in bpm_pairs) / bpm_total if bpm_total else 90.0
 
         curve_len = max((len(a.energy_curve) for _, a in analyses), default=12)
         curve = []
         for index in range(curve_len):
             value = 0.0
             weight_sum = 0.0
-            for weight, analysis in analyses:
-                if analysis.energy_curve:
+            for item, analysis in analyses:
+                w = weight(item, 'energy')
+                if analysis.energy_curve and w > 0:
                     src_index = min(len(analysis.energy_curve) - 1, int(index * len(analysis.energy_curve) / curve_len))
-                    value += weight * analysis.energy_curve[src_index]
-                    weight_sum += weight
+                    value += w * analysis.energy_curve[src_index]
+                    weight_sum += w
             curve.append(value / weight_sum if weight_sum else 0.72)
 
-        tone_keys = set().union(*(a.tone.keys() for _, a in analyses))
-        stereo_keys = set().union(*(a.stereo.keys() for _, a in analyses))
-        dynamics_keys = set().union(*(a.dynamics.keys() for _, a in analyses))
-        groove_keys = set().union(*(a.groove.keys() for _, a in analyses))
-
-        def blend_dict(keys, attr):
+        def blend_dict(attr: str, role: str) -> dict[str, float]:
+            keys = set().union(*(getattr(a, attr).keys() for _, a in analyses))
             out = {}
             for key in keys:
-                pairs = [(w, getattr(a, attr).get(key)) for w, a in analyses if getattr(a, attr).get(key) is not None]
+                pairs = [
+                    (weight(item, role), getattr(a, attr).get(key))
+                    for item, a in analyses
+                    if getattr(a, attr).get(key) is not None and weight(item, role) > 0
+                ]
                 denom = sum(w for w, _ in pairs)
                 if denom:
                     out[key] = sum(w * float(v) for w, v in pairs) / denom
@@ -164,10 +171,10 @@ class NexusEngine:
             bpm=bpm,
             duration=max((a.duration for _, a in analyses), default=0.0),
             energy_curve=curve,
-            groove=blend_dict(groove_keys, 'groove'),
-            tone=blend_dict(tone_keys, 'tone'),
-            stereo=blend_dict(stereo_keys, 'stereo'),
-            dynamics=blend_dict(dynamics_keys, 'dynamics'),
+            groove=blend_dict('groove', 'drums'),
+            tone=blend_dict('tone', 'tone'),
+            stereo=blend_dict('stereo', 'stereo'),
+            dynamics=blend_dict('dynamics', 'master'),
         )
 
     def _production_prompt(self, state: ProjectState, reference: ReferenceAnalysis) -> str:
