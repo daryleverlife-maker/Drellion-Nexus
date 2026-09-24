@@ -16,6 +16,8 @@ from ..production_v2 import generate_three_previews, build_full_song, create_bro
 from ..health import check_project
 from ..export_v2 import ExportPlan, export_project
 from ..versions import create_snapshot, list_snapshots
+from ..stems import available_stem_engines
+from ..youtube import fetch_oembed
 from .player import PlayerBar
 from .worker import FunctionThread
 from .theme import stylesheet_for
@@ -74,7 +76,7 @@ class AccessibilityDialog(QDialog):
 
 
 class SourceRow(QGroupBox):
-    ROLES = ["Lead Vocal", "Backing Vocal", "Drums", "Bass", "Music", "Instrument", "Other"]
+    ROLES = ["Lead Vocal", "Backing Vocal", "Full Song", "Instrumental", "Drums", "Bass", "Music", "Instrument", "Other"]
 
     def __init__(self, source: SourceAsset, parent=None):
         super().__init__(source.label or "Source", parent)
@@ -115,7 +117,10 @@ class SourcesPage(QWidget):
         outer.addLayout(self.rows_box)
         controls = QHBoxLayout()
         add = QPushButton("+ Add Source"); add.clicked.connect(self.add_source)
-        controls.addWidget(add); controls.addStretch(1); outer.addLayout(controls)
+        split = QPushButton("Split Full Song Into Stems"); split.clicked.connect(self.split_full_song)
+        controls.addWidget(add); controls.addWidget(split); controls.addStretch(1); outer.addLayout(controls)
+        self.status = QLabel(""); outer.addWidget(self.status)
+        self._workers = []
         outer.addStretch(1)
         self.refresh()
 
@@ -132,6 +137,48 @@ class SourcesPage(QWidget):
         self.project.add_source()
         self.refresh()
 
+    def split_full_song(self):
+        self.sync()
+        candidates = [s for s in self.project.sources if s.enabled and s.path and s.role in ("Full Song", "Instrumental")]
+        if not candidates:
+            QMessageBox.information(self, "Stem Separation", "Add a Full Song or Instrumental source first.")
+            return
+        choices = available_stem_engines()
+        selected = next(((engine, status) for engine, status in choices if status.available), None)
+        if selected is None:
+            details = "\n".join(f"{status.name}: {status.detail}" for _, status in choices)
+            QMessageBox.information(self, "Stem Separation", "No stem engine is installed.\n\n" + details)
+            return
+        engine, status = selected
+        source = candidates[0]
+        out = self.project.ensure_layout()["stems"] / Path(source.path).stem
+        self.status.setText(f"Separating {Path(source.path).name} with {status.name}…")
+        worker = FunctionThread(engine.separate, source.path, out)
+        self._workers.append(worker)
+        worker.completed.connect(lambda stems, w=worker: self._split_complete(stems, w))
+        worker.failed.connect(lambda message, w=worker: self._split_failed(message, w))
+        worker.start()
+
+    def _split_complete(self, stems, worker):
+        existing = dict(self.project.settings.get("generated_stems", {}) or {})
+        existing.update(stems)
+        self.project.settings["generated_stems"] = existing
+        for role, path in stems.items():
+            self.project.add_source(path=path, role=role.title(), label=Path(path).name)
+        self.project.touch()
+        self.status.setText(f"Created {len(stems)} stems.")
+        self.refresh()
+        if worker in self._workers:
+            self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _split_failed(self, message, worker):
+        self.status.setText("Stem separation failed.")
+        QMessageBox.critical(self, "Stem Separation", message)
+        if worker in self._workers:
+            self._workers.remove(worker)
+        worker.deleteLater()
+
     def sync(self):
         for i in range(self.rows_box.count()):
             widget = self.rows_box.itemAt(i).widget()
@@ -145,9 +192,10 @@ class ReferenceRow(QGroupBox):
         root = QVBoxLayout(self)
         top = QHBoxLayout()
         self.youtube = QLineEdit(reference.youtube_url); self.youtube.setPlaceholderText("YouTube URL")
+        load_yt = QPushButton("Load Link"); load_yt.clicked.connect(self._load_youtube)
         self.path = QLineEdit(reference.path); self.path.setPlaceholderText("or local reference audio")
         browse = QPushButton("Browse"); browse.clicked.connect(self._browse)
-        top.addWidget(self.youtube, 1); top.addWidget(self.path, 1); top.addWidget(browse)
+        top.addWidget(self.youtube, 1); top.addWidget(load_yt); top.addWidget(self.path, 1); top.addWidget(browse)
         root.addLayout(top)
         second = QHBoxLayout()
         self.title = QLineEdit(reference.title); self.title.setPlaceholderText("Title")
@@ -171,6 +219,17 @@ class ReferenceRow(QGroupBox):
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose reference", "", "Audio (*.wav *.flac *.mp3 *.m4a *.aac *.ogg *.aiff)")
         if path: self.path.setText(path)
+
+    def _load_youtube(self):
+        try:
+            meta = fetch_oembed(self.youtube.text().strip())
+            self.title.setText(meta.title)
+            self.artist.setText(meta.author)
+            self.reference.youtube_url = meta.url
+            self.reference.title = meta.title
+            self.reference.artist = meta.author
+        except Exception as exc:
+            QMessageBox.warning(self, "YouTube Reference", str(exc))
 
     def sync(self):
         self.reference.youtube_url = self.youtube.text().strip()
