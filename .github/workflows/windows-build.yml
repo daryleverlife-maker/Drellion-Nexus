@@ -1,12 +1,13 @@
-name: Windows Build
+name: Windows Build — Drellion 2.0 Rebuild
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [v2.0-rebuild]
     paths:
       - "src/**"
       - "tests/**"
+      - "docs/**"
       - "installer/**"
       - "pyproject.toml"
       - ".github/workflows/windows-build.yml"
@@ -14,108 +15,99 @@ on:
 jobs:
   test-and-build:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
       - uses: actions/checkout@v7
-
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-
       - name: Install FFmpeg
         shell: pwsh
         run: |
           choco install ffmpeg -y --no-progress
           ffmpeg -version
           ffprobe -version
-
       - name: Run tests
         run: pytest -q
-
-      - name: Build Drellion Nexus EXE
+      - name: Compile Python sources
+        run: python -m compileall -q src
+      - name: Build Drellion Nexus 2.0 EXE
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --windowed --onedir `
             --name "DrellionNexus" `
             --paths src `
+            --hidden-import PySide6.QtMultimedia `
+            --hidden-import PySide6.QtWebEngineWidgets `
             src/drellion_nexus.py
-
       - name: Bundle FFmpeg runtime
         shell: pwsh
         run: |
-          $ffmpeg = Get-ChildItem "C:\ProgramData\chocolatey\lib" -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue |
+          $ffmpeg = Get-ChildItem "C:ProgramDatachocolateylib" -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -gt 1000000 } |
             Select-Object -First 1
           if (-not $ffmpeg) { throw "Could not locate the real ffmpeg.exe installed by Chocolatey." }
           $ffbin = $ffmpeg.Directory.FullName
-          New-Item -ItemType Directory -Path "dist\DrellionNexus\bin" -Force | Out-Null
-          Copy-Item "$ffbin\ffmpeg.exe" "dist\DrellionNexus\bin\ffmpeg.exe" -Force
+          New-Item -ItemType Directory -Path "distDrellionNexusin" -Force | Out-Null
+          Copy-Item "$ffbinfmpeg.exe" "distDrellionNexusinfmpeg.exe" -Force
           $ffprobe = Join-Path $ffbin "ffprobe.exe"
-          if (Test-Path $ffprobe) { Copy-Item $ffprobe "dist\DrellionNexus\bin\ffprobe.exe" -Force }
-          Get-ChildItem $ffbin -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "dist\DrellionNexus\bin\" -Force }
-
+          if (Test-Path $ffprobe) { Copy-Item $ffprobe "distDrellionNexusinfprobe.exe" -Force }
+          Get-ChildItem $ffbin -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "distDrellionNexusin" -Force }
       - name: Smoke test packaged layout
         shell: pwsh
         run: |
-          if (!(Test-Path "dist\DrellionNexus\DrellionNexus.exe")) { throw "DrellionNexus.exe was not created." }
-          if (!(Test-Path "dist\DrellionNexus\bin\ffmpeg.exe")) { throw "Bundled ffmpeg.exe was not created." }
-
+          if (!(Test-Path "distDrellionNexusDrellionNexus.exe")) { throw "DrellionNexus.exe was not created." }
+          if (!(Test-Path "distDrellionNexusinfmpeg.exe")) { throw "Bundled ffmpeg.exe was not created." }
       - name: Package portable build
         shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\DrellionNexus\*" -DestinationPath "Drellion-Nexus-Portable.zip" -Force
-
+        run: Compress-Archive -Path "distDrellionNexus*" -DestinationPath "Drellion-Nexus-2.0-Portable.zip" -Force
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup -y --no-progress
-
       - name: Build Windows installer
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\DrellionNexus.iss"
-          if (!(Test-Path "installer-output\Drellion-Nexus-Setup.exe")) { throw "Installer was not created." }
-
+          & "C:Program Files (x86)Inno Setup 6ISCC.exe" "installerDrellionNexus.iss"
+          if (!(Test-Path "installer-outputDrellion-Nexus-2.0-Setup.exe")) { throw "Installer was not created." }
       - name: Checksums
         shell: pwsh
         run: |
+          $files = @("Drellion-Nexus-2.0-Portable.zip", "installer-outputDrellion-Nexus-2.0-Setup.exe")
           if (Test-Path "checksums.sha256") { Remove-Item "checksums.sha256" -Force }
-          $files = @("Drellion-Nexus-Portable.zip", "installer-output\Drellion-Nexus-Setup.exe")
           foreach ($file in $files) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
-            "$hash  $file" | Out-File -FilePath checksums.sha256 -Append -Encoding ascii
+            "$hash  $(Split-Path $file -Leaf)" | Out-File -FilePath checksums.sha256 -Append -Encoding ascii
           }
-
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Installer
-          path: installer-output/Drellion-Nexus-Setup.exe
+          name: Drellion-Nexus-2.0-Installer
+          path: installer-output/Drellion-Nexus-2.0-Setup.exe
           if-no-files-found: error
           retention-days: 14
-
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Portable
-          path: Drellion-Nexus-Portable.zip
+          name: Drellion-Nexus-2.0-Portable
+          path: Drellion-Nexus-2.0-Portable.zip
           if-no-files-found: error
           retention-days: 14
-
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Checksums
+          name: Drellion-Nexus-2.0-Checksums
           path: checksums.sha256
           if-no-files-found: error
           retention-days: 14
