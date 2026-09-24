@@ -90,10 +90,12 @@ class DashboardPage(QWidget):
         form=QFormLayout(details)
         self.name=QLineEdit(project.name)
         self.artist=QLineEdit(project.artist)
+        self.start_mode=QComboBox(); self.start_mode.addItems(["Vocal / Acapella","Vocal + Stems","Full Song","Multiple Songs / Mashup","Instrumental","Lyrics Only","Empty Studio"])
+        self.start_mode.setCurrentText(str(project.settings.get("start_mode","Vocal / Acapella")))
         self.root=QLineEdit(project.project_root or str(Path(storage.projects) / project.name))
         browse=QPushButton("Choose Folder"); browse.clicked.connect(self._browse)
         row=QHBoxLayout(); row.addWidget(self.root,1); row.addWidget(browse)
-        form.addRow("Project name",self.name); form.addRow("Artist",self.artist); form.addRow("Save location",row)
+        form.addRow("Project name",self.name); form.addRow("Artist",self.artist); form.addRow("Start from",self.start_mode); form.addRow("Save location",row)
         root.addWidget(details)
 
         workflow=QGroupBox("Workflow Status")
@@ -114,6 +116,7 @@ class DashboardPage(QWidget):
     def sync(self):
         self.project.name=self.name.text().strip() or "Untitled"
         self.project.artist=self.artist.text().strip()
+        self.project.settings["start_mode"]=self.start_mode.currentText()
         self.project.project_root=self.root.text().strip()
         self.project.touch(); self.refresh_status()
 
