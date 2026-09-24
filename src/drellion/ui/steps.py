@@ -15,6 +15,7 @@ from ..exporter import PRESETS, export_audio
 from ..library import SoundLibrary
 from ..metadata import TrackMetadata, embed_metadata
 from ..project import ReferenceSlot, SourceSlot
+from ..storage import consolidate_file, ensure_project_folders
 from ..youtube import youtube_oembed
 from .export_center import ExportCenterDialog
 from .reference_roles import ReferenceRolesDialog
@@ -121,6 +122,9 @@ class SourceRow(QWidget):
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose Source Audio", "", AUDIO_FILTER)
         if path:
+            if bool(self.step.window.project.settings.get("consolidate_imports", True)):
+                folders = ensure_project_folders(self.step.window.project, self.step.window.project_path)
+                path = str(consolidate_file(path, folders.sources))
             self.path.setText(path)
             self.changed()
             if self.role.currentText() == "Lead Vocal":
@@ -334,6 +338,9 @@ class ReferenceRow(QWidget):
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose Reference Audio", "", AUDIO_FILTER)
         if path:
+            if bool(self.step.window.project.settings.get("consolidate_imports", True)):
+                folders = ensure_project_folders(self.step.window.project, self.step.window.project_path)
+                path = str(consolidate_file(path, folders.references))
             self.path.setText(path)
             if not self.title.text().strip():
                 self.title.setText(Path(path).stem)
