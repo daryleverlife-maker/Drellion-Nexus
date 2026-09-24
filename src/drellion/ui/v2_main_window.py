@@ -9,7 +9,7 @@ from ..accessibility import AccessibilitySettings
 from ..autosave import write_autosave
 from ..project import ProjectState
 from ..storage import StorageSettings
-from .theme import APP_QSS
+from .theme import stylesheet_for
 from .v2_workspace import V2Workspace
 
 
@@ -19,13 +19,12 @@ class V2MainWindow(QMainWindow):
         self.setWindowTitle("Drellion Nexus 2.0")
         self.resize(1500, 940)
         self.setMinimumSize(1100, 720)
-        self.setStyleSheet(APP_QSS)
-
         self.project = ProjectState()
         self.project_path: Path | None = None
         self.storage = StorageSettings.defaults()
         self.storage.ensure()
         self.accessibility = AccessibilitySettings()
+        self.setStyleSheet(stylesheet_for(self.accessibility))
 
         self.workspace = V2Workspace(self.project, self.storage, self.accessibility, self)
         self.setCentralWidget(self.workspace)
