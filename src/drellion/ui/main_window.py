@@ -1,539 +1,200 @@
+from __future__ import annotations
+
 from pathlib import Path
-import re
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtCore import QThreadPool,QTimer,Qt,QUrl
+from PySide6.QtGui import QAction,QDesktopServices,QKeySequence
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QProgressDialog, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication,QFileDialog,QHBoxLayout,QLabel,QListWidget,QMainWindow,QMessageBox,
+    QProgressBar,QPushButton,QStackedWidget,QStatusBar,QVBoxLayout,QWidget,QInputDialog,
 )
 
-from ..auto import run_full_auto
-from ..autosave import autosave_path, write_autosave
-from ..engine import NexusEngine
-from ..history import History
-from ..project import MediaSlot, ProjectState
-from .player import PlayerBar
-from .advanced import AdvancedControlsDialog
-from .theme import APP_QSS
-from .steps import (
-    VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
-)
-from .studio import StudioWindow
-from .worker import FunctionThread
+from ..accessibility import AccessibilitySettings
+from ..autosave import clear_autosave,load_autosave,newer_autosave,write_autosave
+from ..project import PROJECT_FILENAME,ProjectState
+from ..storage import load_storage_settings
+from ..versions import create_snapshot
+from .auto_pages import BuildPage,DirectionPage,MasterPage,PreviewsPage,ProjectPage,ReferencesPage,SourcesPage
+from .dialogs import AccessibilityDialog,NewProjectDialog
+from .studio import StudioPage
+from .utility_pages import EnginesPage,ExportPage,HealthPage,LibraryPage,LyricsPage,ProjectFilesPage,StoragePage,VersionsPage
+from .worker import Worker
 
 
-AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
+class HomePage(QWidget):
+    def __init__(self,host):
+        super().__init__(); self.host=host; root=QVBoxLayout(self); root.setContentsMargins(40,30,40,30)
+        title=QLabel("DRELLION NEXUS 2.0"); title.setStyleSheet("font-size:30px;font-weight:800;")
+        subtitle=QLabel("Give Drellion your voice and production references. Build an original, editable production around your performance."); subtitle.setWordWrap(True); subtitle.setStyleSheet("font-size:15px;")
+        buttons=QHBoxLayout(); vocal=QPushButton("CREATE FROM VOCAL\nBuild a new production around my voice"); rework=QPushButton("REWORK A SONG\nRebuild or transform an existing song"); studio=QPushButton("OPEN STUDIO\nStart an empty multitrack project")
+        for b in (vocal,rework,studio):b.setMinimumHeight(84); buttons.addWidget(b)
+        vocal.clicked.connect(lambda:host.new_project("Vocal / Acapella")); rework.clicked.connect(lambda:host.new_project("Full Song")); studio.clicked.connect(lambda:host.new_project("Empty Studio"))
+        recent_label=QLabel("Recent Projects"); recent_label.setStyleSheet("font-size:20px;font-weight:700;"); self.recent=QListWidget(); self.recent.itemDoubleClicked.connect(lambda item:host.open_project_path(Path(item.data(Qt.UserRole)))); open_btn=QPushButton("Open Existing Project"); open_btn.clicked.connect(host.open_project)
+        root.addWidget(title); root.addWidget(subtitle); root.addSpacing(10); root.addLayout(buttons); root.addSpacing(20); root.addWidget(recent_label); root.addWidget(self.recent,1); root.addWidget(open_btn)
+    def refresh(self):
+        self.recent.clear(); root=Path(load_storage_settings().projects)
+        if not root.exists():return
+        candidates=[]
+        try:
+            for p in root.glob(f"*/{PROJECT_FILENAME}"):
+                try:candidates.append((p.stat().st_mtime,p))
+                except OSError:pass
+        except OSError:return
+        for _mtime,p in sorted(candidates,reverse=True)[:30]:
+            try:
+                project=ProjectState.load(p); text=f"{project.title}  ·  {project.artist or 'Untitled artist'}  ·  {len(project.sources)} source(s)  ·  {len(project.builds)} build(s)"
+            except Exception:text=p.parent.name
+            from PySide6.QtWidgets import QListWidgetItem
+            item=QListWidgetItem(text); item.setData(Qt.UserRole,str(p)); self.recent.addItem(item)
 
 
 class MainWindow(QMainWindow):
-    STEP_TITLES = [
-        "1  Vocal & Lyrics",
-        "2  Reference",
-        "3  Sounds",
-        "4  Preview",
-        "5  Build",
-        "6  Master",
-    ]
+    NAV=["Home","Project","Sources","References","Direction","Previews","Build","Master","Studio","Library","Export","Versions","Project Files","Lyrics & Timing","AI Engines","Project Health","Storage"]
+    def __init__(self,accessibility:AccessibilitySettings|None=None):
+        super().__init__(); self.accessibility=accessibility or AccessibilitySettings(); self.project:ProjectState|None=None; self.thread_pool=QThreadPool.globalInstance(); self.current_worker:Worker|None=None; self._autosave_pending=False
+        self.setWindowTitle("Drellion Nexus 2.0"); self.resize(1500,900); self.setAcceptDrops(True); self._build_ui(); self._build_menu(); self._build_status(); self._periodic=QTimer(self); self._periodic.timeout.connect(self.autosave); self._periodic.start(120_000); self.home.refresh(); self._set_project_enabled(False); self._decorate_accessibility(self)
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Drellion Nexus")
-        self.resize(1400, 900)
-        self.setMinimumSize(1040, 700)
-        self.setStyleSheet(APP_QSS)
-        self.setAcceptDrops(True)
+    def _build_ui(self):
+        central=QWidget(); root=QVBoxLayout(central); root.setContentsMargins(0,0,0,0)
+        header=QWidget(); hh=QHBoxLayout(header); hh.setContentsMargins(12,8,12,8); self.project_label=QLabel("Drellion Nexus 2.0"); self.project_label.setStyleSheet("font-size:17px;font-weight:700;"); auto=QPushButton("AI AUTO"); auto.clicked.connect(lambda:self.navigate("Sources")); studio=QPushButton("STUDIO"); studio.clicked.connect(lambda:self.navigate("Studio")); access=QPushButton("♿ Accessibility"); access.clicked.connect(self.open_accessibility); folder=QPushButton("📁 Open Project Folder"); folder.clicked.connect(self.open_project_folder); hh.addWidget(self.project_label); hh.addStretch(); hh.addWidget(auto); hh.addWidget(studio); hh.addWidget(folder); hh.addWidget(access)
+        body=QWidget(); bh=QHBoxLayout(body); bh.setContentsMargins(0,0,0,0); self.nav=QListWidget(); self.nav.setFixedWidth(190); self.nav.addItems(self.NAV); self.nav.currentTextChanged.connect(self.navigate); self.stack=QStackedWidget(); self.pages={}; self.home=HomePage(self); self.pages["Home"]=self.home; self.stack.addWidget(self.home)
+        for cls in (ProjectPage,SourcesPage,ReferencesPage,DirectionPage,PreviewsPage,BuildPage,MasterPage,StudioPage,LibraryPage,ExportPage,VersionsPage,ProjectFilesPage,LyricsPage,EnginesPage,HealthPage,StoragePage):
+            page=cls(self); self.pages[page.title]=page; self.stack.addWidget(page)
+        bh.addWidget(self.nav); bh.addWidget(self.stack,1); root.addWidget(header); root.addWidget(body,1); self.setCentralWidget(central); self.nav.setCurrentRow(0)
 
-        self.project = ProjectState()
-        self.project_path = None
-        self.history = History(self.project)
-        self.engine = NexusEngine()
-        self.current_step = 0
-        self._workers = []
+    def _build_menu(self):
+        file=self.menuBar().addMenu("&File"); actions=[("New Project",QKeySequence.New,lambda:self.new_project()),("Open Project",QKeySequence.Open,self.open_project),("Save",QKeySequence.Save,self.save_project),("Save As",QKeySequence.SaveAs,self.save_as),("Save Copy",None,self.save_copy),("Snapshot",None,self.snapshot),("Consolidate Imported Media",None,self.consolidate),("Open Project Folder",None,self.open_project_folder),("Exit",QKeySequence.Quit,self.close)]
+        for text,shortcut,slot in actions:
+            action=QAction(text,self); action.triggered.connect(slot)
+            if shortcut:action.setShortcut(shortcut)
+            file.addAction(action)
+        edit=self.menuBar().addMenu("&Navigate")
+        for name in self.NAV:
+            action=QAction(name,self); action.triggered.connect(lambda _=False,n=name:self.navigate(n)); edit.addAction(action)
+        help_menu=self.menuBar().addMenu("&Help"); about=QAction("About Drellion Nexus 2.0",self); about.triggered.connect(lambda:QMessageBox.information(self,"About","Drellion Nexus 2.0\nVocal-first, reference-guided, editable music production.")); help_menu.addAction(about)
 
-        self.build_ui()
-        self.build_menus()
-        self.bind_shortcuts()
+    def _build_status(self):
+        status=QStatusBar(); self.setStatusBar(status); self.task_label=QLabel("Ready"); self.progress=QProgressBar(); self.progress.setRange(0,0); self.progress.setMaximumWidth(220); self.progress.hide(); self.cancel=QPushButton("Cancel"); self.cancel.hide(); self.cancel.clicked.connect(self.cancel_task); status.addWidget(self.task_label,1); status.addPermanentWidget(self.progress); status.addPermanentWidget(self.cancel)
 
-        self.autosave_timer = QTimer(self)
-        self.autosave_timer.timeout.connect(self.autosave)
-        self.autosave_timer.start(15000)
+    def _decorate_accessibility(self,widget):
+        from PySide6.QtWidgets import QAbstractButton,QLabel,QLineEdit,QComboBox,QAbstractSpinBox,QAbstractSlider
+        for child in widget.findChildren(QWidget):
+            if child.accessibleName():continue
+            name=""
+            if isinstance(child,QAbstractButton):name=child.text().replace("&","")
+            elif isinstance(child,QLabel):name=child.text()
+            elif isinstance(child,QLineEdit):name=child.placeholderText()
+            elif isinstance(child,QComboBox):name="Choice"
+            elif isinstance(child,QAbstractSpinBox):name="Numeric value"
+            elif isinstance(child,QAbstractSlider):name="Slider"
+            if name:child.setAccessibleName(name[:160])
 
-    def build_ui(self):
-        root = QWidget()
-        self.setCentralWidget(root)
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 14, 18, 14)
-        outer.setSpacing(12)
+    def _set_project_enabled(self,enabled):
+        for i,name in enumerate(self.NAV):
+            item=self.nav.item(i); item.setHidden(False); item.setFlags(item.flags()|Qt.ItemIsEnabled if enabled or name in {"Home","Storage"} else item.flags()&~Qt.ItemIsEnabled)
 
-        top = QHBoxLayout()
-        brand = QLabel("DRELLION NEXUS")
-        brand.setStyleSheet("font-size:18pt;font-weight:700;letter-spacing:1px;")
-        top.addWidget(brand)
-        top.addStretch()
+    def navigate(self,name):
+        if name not in self.pages:return
+        if name not in {"Home","Storage"} and not self.project:return
+        page=self.pages[name]; self.stack.setCurrentWidget(page)
+        for i in range(self.nav.count()):
+            if self.nav.item(i).text()==name:self.nav.blockSignals(True); self.nav.setCurrentRow(i); self.nav.blockSignals(False); break
+        if hasattr(page,"refresh"):page.refresh()
 
-        for text, callback in [
-            ("New", self.new_project),
-            ("Open", self.open_project),
-            ("Save", self.save_project),
-            ("Undo", self.undo),
-            ("Redo", self.redo),
-        ]:
-            button = QPushButton(text)
-            button.clicked.connect(callback)
-            top.addWidget(button)
-
-        self.auto_button = QPushButton("AI AUTO")
-        self.auto_button.setObjectName("Primary")
-        self.auto_button.clicked.connect(self.run_ai_auto)
-        top.addWidget(self.auto_button)
-        advanced = QPushButton("ADVANCED")
-        advanced.clicked.connect(self.open_advanced)
-        top.addWidget(advanced)
-        studio = QPushButton("CUSTOM STUDIO")
-        studio.clicked.connect(self.open_studio)
-        top.addWidget(studio)
-        outer.addLayout(top)
-
-        body = QHBoxLayout()
-        body.setSpacing(12)
-
-        nav = QFrame()
-        nav.setObjectName("Card")
-        nav.setFixedWidth(230)
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(12, 14, 12, 14)
-        self.nav_buttons = []
-        for index, title in enumerate(self.STEP_TITLES):
-            button = QPushButton(title)
-            button.clicked.connect(lambda _=False, i=index: self.goto_step(i))
-            nav_layout.addWidget(button)
-            self.nav_buttons.append(button)
-        nav_layout.addStretch()
-        body.addWidget(nav)
-
-        self.stack = QStackedWidget()
-        self.steps = [
-            VocalLyricsStep(self),
-            ReferenceStep(self),
-            SoundsStep(self),
-            PreviewStep(self),
-            BuildStep(self),
-            MasterStep(self),
-        ]
-        for step in self.steps:
-            area = QScrollArea()
-            area.setWidgetResizable(True)
-            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            area.setWidget(step)
-            self.stack.addWidget(area)
-        body.addWidget(self.stack, 1)
-
-        side = QFrame()
-        side.setObjectName("Card")
-        side.setFixedWidth(280)
-        side_layout = QVBoxLayout(side)
-        side_layout.addWidget(QLabel("PROJECT"))
-        self.project_summary = QLabel()
-        self.project_summary.setWordWrap(True)
-        self.project_summary.setObjectName("Muted")
-        side_layout.addWidget(self.project_summary)
-        side_layout.addStretch()
-        body.addWidget(side)
-        outer.addLayout(body, 1)
-
-        self.player = PlayerBar(self)
-        outer.addWidget(self.player)
-
-        self.goto_step(0)
-        self.refresh_summary()
-
-    def build_menus(self):
-        file_menu = self.menuBar().addMenu("&File")
-
-        actions = [
-            ("New Project", QKeySequence.New, self.new_project),
-            ("Open…", QKeySequence.Open, self.open_project),
-            ("Save", QKeySequence.Save, self.save_project),
-            ("Save As…", QKeySequence.SaveAs, self.save_project_as),
-            ("Save Copy…", None, self.save_copy),
-            ("Recover Autosave", None, self.recover_autosave),
-        ]
-        for title, shortcut, callback in actions:
-            action = QAction(title, self)
-            if shortcut:
-                action.setShortcut(shortcut)
-            action.triggered.connect(callback)
-            file_menu.addAction(action)
-        file_menu.addSeparator()
-        quit_action = QAction("Exit", self)
-        quit_action.triggered.connect(self.close)
-        file_menu.addAction(quit_action)
-
-        edit_menu = self.menuBar().addMenu("&Edit")
-        undo_action = QAction("Undo", self)
-        undo_action.setShortcut(QKeySequence.Undo)
-        undo_action.triggered.connect(self.undo)
-        edit_menu.addAction(undo_action)
-
-        redo_action = QAction("Redo", self)
-        redo_action.setShortcut(QKeySequence.Redo)
-        redo_action.triggered.connect(self.redo)
-        edit_menu.addAction(redo_action)
-
-        edit_menu.addSeparator()
-        clear_action = QAction("Clear Current Step", self)
-        clear_action.triggered.connect(self.clear_current_step)
-        edit_menu.addAction(clear_action)
-
-        reset_action = QAction("Reset Project…", self)
-        reset_action.triggered.connect(self.reset_project)
-        edit_menu.addAction(reset_action)
-
-    def run_ai_auto(self):
-        if not self.project.vocal.path or not self.project.reference.path:
-            QMessageBox.information(
-                self,
-                "AI Auto",
-                "Load a vocal stem and a reference track first.",
-            )
-            return
-
-        answer = QMessageBox.question(
-            self,
-            "Run AI Auto",
-            "AI Auto will generate three arrangements, choose a direction, "
-            "optionally add lyric-aware SFX, build the full song and master it.\n\n"
-            "You can undo the result or continue editing it in Custom Studio. Continue?",
-        )
-        if answer != QMessageBox.Yes:
-            return
-
-        output = self.project_output_dir() / "Auto"
-        progress = QProgressDialog(
-            "Drellion Nexus is running the full AI Auto production…",
-            "",
-            0,
-            0,
-            self,
-        )
-        progress.setWindowTitle("AI Auto")
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.show()
-
-        self.auto_button.setEnabled(False)
-        worker = FunctionThread(run_full_auto, self.project, output, engine=self.engine)
-        self._workers.append(worker)
-
-        def cleanup():
-            self.auto_button.setEnabled(True)
-            progress.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
-            worker.deleteLater()
-
-        def complete(result):
-            self.project = result.state
-            self.history.push("AI Auto complete", self.project)
-            preview_step = self.steps[3]
-            preview_step.preview_paths = {
-                item.name: item.audio_path for item in result.previews
-            }
-            for item in result.previews:
-                if item.name in preview_step.preview_descriptions:
-                    preview_step.preview_descriptions[item.name].setText(item.description)
-            preview_step._update_sfx_status()
-            self.sync_ui_from_project()
-            self.refresh_player_sources("Master")
-            self.goto_step(5)
-            cleanup()
-            QMessageBox.information(
-                self,
-                "AI Auto complete",
-                f"Selected: {result.chosen_preview}\n"
-                f"Build: {result.build.build_path}\n"
-                f"Master: {result.master_path}",
-            )
-
-        def failed(message):
-            cleanup()
-            QMessageBox.critical(self, "AI Auto failed", message)
-
-        worker.completed.connect(complete)
-        worker.failed.connect(failed)
-        worker.start()
-
-    def open_advanced(self):
-        before = self.project.to_dict()
-        dialog = AdvancedControlsDialog(self.project, self)
-        if dialog.exec():
-            if self.project.to_dict() != before:
-                self.snapshot("Changed advanced controls")
-
-    def open_studio(self):
-        self.studio_window = StudioWindow(self)
-        self.studio_window.show()
-
-    def bind_shortcuts(self):
-        QShortcut(QKeySequence.Save, self, activated=self.save_project)
-        QShortcut(QKeySequence.Open, self, activated=self.open_project)
-        QShortcut(QKeySequence.Undo, self, activated=self.undo)
-        QShortcut(QKeySequence.Redo, self, activated=self.redo)
-
-    def snapshot(self, label):
-        self.project.touch()
-        self.history.push(label, self.project)
-        self.refresh_summary()
-
-    def goto_step(self, index):
-        if not 0 <= index < len(self.steps):
-            return
-        self.current_step = index
-        self.stack.setCurrentIndex(index)
-        for i, button in enumerate(self.nav_buttons):
-            button.setObjectName("Primary" if i == index else "")
-            button.style().unpolish(button)
-            button.style().polish(button)
-
-    def project_output_dir(self) -> Path:
-        if self.project_path is not None:
-            root = self.project_path.parent / (self.project_path.stem + " - Renders")
-        else:
-            safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", self.project.name or "Untitled").strip()
-            root = Path.home() / "Drellion Nexus" / "Projects" / (safe or "Untitled") / "Renders"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-
-    def refresh_player_sources(self, preferred: str | None = None):
-        sources = {
-            "Vocal": self.project.vocal.path,
-            "Reference": self.project.reference.path,
-            "Build": self.project.build_path,
-            "Master": self.project.master_path,
-        }
-        preview_step = self.steps[3] if len(self.steps) > 3 else None
-        if preview_step is not None:
-            for label, path in getattr(preview_step, "preview_paths", {}).items():
-                sources[label] = path
-        self.player.set_sources(sources, preferred=preferred)
-
-    def refresh_summary(self):
-        p = self.project
-        self.project_summary.setText(
-            f"{p.name}\n\n"
-            f"Vocal: {'Loaded' if p.vocal.path else 'Not loaded'}\n"
-            f"Reference: {'Loaded' if p.reference.path else 'Not loaded'}\n"
-            f"Sounds: {'Configured' if p.sound_library_path else 'Default library'}\n"
-            f"Preview: {p.selected_preview or 'Not selected'}\n"
-            f"Build: {'Ready' if p.build_path else 'Not built'}\n"
-            f"Master: {'Ready' if p.master_path else 'Not mastered'}"
-        )
-        if hasattr(self, "player"):
-            self.refresh_player_sources()
-
-    def sync_ui_from_project(self):
-        if not getattr(self, "steps", None):
-            return
-
-        vocal = self.steps[0]
-        vocal.path.blockSignals(True)
-        vocal.lyrics.blockSignals(True)
-        vocal.preserve.blockSignals(True)
-        vocal.path.setText(self.project.vocal.path)
-        vocal.lyrics.setPlainText(self.project.lyrics)
-        vocal.preserve.setCurrentText(self.project.vocal_preservation)
-        vocal.path.blockSignals(False)
-        vocal.lyrics.blockSignals(False)
-        vocal.preserve.blockSignals(False)
-
-        reference = self.steps[1]
-        reference.path.setText(self.project.reference.path)
-
-        sounds = self.steps[2]
-        sounds.path.setText(self.project.sound_library_path)
-
-        master = self.steps[5]
-        target_lufs = float(self.project.settings.get("target_lufs", -14.0))
-        text = f"{int(target_lufs) if target_lufs.is_integer() else target_lufs:g} LUFS"
-        if master.target.findText(text) >= 0:
-            master.target.setCurrentText(text)
-
-        self.refresh_summary()
-
-    def new_project(self):
-        self.project = ProjectState()
-        self.project_path = None
-        self.history = History(self.project)
-        self.sync_ui_from_project()
-        self.goto_step(0)
-
-    def load_project_path(self, path: str | Path):
-        self.project = ProjectState.load(path)
-        self.project_path = Path(path)
-        self.history = History(self.project)
-        self.sync_ui_from_project()
+    def new_project(self,preset_mode=None):
+        dialog=NewProjectDialog(self)
+        if preset_mode:dialog.mode.setCurrentText(preset_mode)
+        if not dialog.exec():return
+        v=dialog.values()
+        try:
+            project=ProjectState.create(v["parent"],v["title"],v["artist"],v["mode"],v["keep"]); project.autosave_seconds=v["autosave_seconds"]; project.save(); self.set_project(project); self.navigate("Studio" if v["mode"]=="Empty Studio" else "Sources")
+        except Exception as exc:QMessageBox.critical(self,"New Project",str(exc))
 
     def open_project(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Drellion Project", "", "Drellion Project (*.drellion)"
-        )
-        if not path:
-            return
+        settings=load_storage_settings(); path,_=QFileDialog.getOpenFileName(self,"Open Drellion Project",settings.projects,"Drellion Project (*.drellion);;All files (*)")
+        if path:self.open_project_path(Path(path))
+
+    def open_project_path(self,path):
         try:
-            self.load_project_path(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Open failed", str(exc))
+            recovery=newer_autosave(path)
+            if recovery:
+                box=QMessageBox(self); box.setWindowTitle("Recovery Found"); box.setText("Drellion found a newer recovery version."); recover=box.addButton("Recover Autosave",QMessageBox.AcceptRole); box.addButton("Open Last Saved",QMessageBox.RejectRole); box.exec()
+                if box.clickedButton()==recover:project=load_autosave(recovery); project.root=str(path.parent)
+                else:project=ProjectState.load(path)
+            else:project=ProjectState.load(path)
+            self.set_project(project); self.navigate("Project")
+        except Exception as exc:QMessageBox.critical(self,"Open Project",str(exc))
 
-    def save_project(self):
-        if self.project_path is None:
-            return self.save_project_as()
-        self.project_path = self.project.save(self.project_path)
-        self.refresh_summary()
+    def set_project(self,project):
+        self.project=project; project.ensure_layout(); self.project_label.setText(f"{project.title} — {project.artist or 'Untitled artist'}"); self._periodic.setInterval(max(30,project.autosave_seconds)*1000); self._set_project_enabled(True); self.project_changed()
 
-    def save_project_as(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Drellion Project As", "", "Drellion Project (*.drellion)"
-        )
-        if not path:
-            return
-        self.project_path = self.project.save(path)
-        self.refresh_summary()
+    def project_changed(self):
+        if not self.project:return
+        for page in self.pages.values():
+            if page is self.stack.currentWidget() and hasattr(page,"refresh"):page.refresh()
+        self.home.refresh(); self.schedule_autosave()
 
-    def save_copy(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Project Copy", "", "Drellion Project (*.drellion)"
-        )
-        if not path:
-            return
-        original = self.project_path
-        self.project.save(path)
-        self.project_path = original
-        self.refresh_summary()
-
-    def recover_autosave(self):
-        path = autosave_path(
-            self.project_path,
-            Path.home() / "Drellion Nexus" / "Autosaves",
-        )
-        if not path.is_file():
-            QMessageBox.information(self, "Recover Autosave", "No autosave exists for this project.")
-            return
-        try:
-            recovered = ProjectState.load(path)
-            self.project = recovered
-            self.history = History(self.project)
-            self.sync_ui_from_project()
-            QMessageBox.information(self, "Recover Autosave", "Autosave restored into the current project.")
-        except Exception as exc:
-            QMessageBox.critical(self, "Recover Autosave", str(exc))
-
+    def schedule_autosave(self):
+        if not self.project or self._autosave_pending:return
+        self._autosave_pending=True
+        def later():self._autosave_pending=False; self.autosave()
+        QTimer.singleShot(1500,later)
     def autosave(self):
-        try:
-            write_autosave(
-                self.project,
-                self.project_path,
-                Path.home() / "Drellion Nexus" / "Autosaves",
-            )
-        except Exception:
-            pass
+        if self.project:
+            try:write_autosave(self.project)
+            except Exception:pass
+    def save_project(self):
+        if not self.project:return
+        try:self.project.save(); clear_autosave(self.project); self.task_label.setText("Saved")
+        except Exception as exc:QMessageBox.critical(self,"Save",str(exc))
+    def save_as(self):
+        if not self.project:return
+        folder=QFileDialog.getExistingDirectory(self,"Save As — choose new project folder")
+        if not folder:return
+        try:self.set_project(self.project.save_as(folder)); self.navigate("Project")
+        except Exception as exc:QMessageBox.critical(self,"Save As",str(exc))
+    def save_copy(self):
+        if not self.project:return
+        path,_=QFileDialog.getSaveFileName(self,"Save Copy",str(self.project.root_path/f"{self.project.title}-Copy.drellion"),"Drellion Project (*.drellion)")
+        if path:self.project.save_copy(path)
+    def snapshot(self):
+        if not self.project:return
+        name,ok=QInputDialog.getText(self,"Snapshot","Snapshot name")
+        if ok:create_snapshot(self.project,name or "Snapshot"); self.pages["Versions"].refresh()
+    def consolidate(self):
+        if not self.project:return
+        counts=self.project.consolidate_imported_media(); self.project.save(); QMessageBox.information(self,"Consolidate",f"Copied {counts['sources']} source(s) and {counts['references']} reference(s).")
+    def open_project_folder(self):
+        if self.project:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project.root_path.resolve())))
+    def open_accessibility(self):
+        AccessibilityDialog(QApplication.instance(),self.accessibility,self).exec(); self._decorate_accessibility(self)
 
-    def undo(self):
-        state = self.history.undo()
-        if state is not None:
-            self.project = state
-            self.sync_ui_from_project()
-
-    def redo(self):
-        state = self.history.redo()
-        if state is not None:
-            self.project = state
-            self.sync_ui_from_project()
-
-    def clear_current_step(self):
-        if self.current_step == 0:
-            self.project.vocal = MediaSlot()
-            self.project.lyrics = ""
-        elif self.current_step == 1:
-            self.project.reference = MediaSlot()
-        elif self.current_step == 2:
-            self.project.sound_library_path = ""
-            self.project.settings.pop("sound_count", None)
-        elif self.current_step == 3:
-            self.project.selected_preview = ""
-            self.steps[3].preview_paths.clear()
-        elif self.current_step == 4:
-            self.project.build_path = ""
-            self.project.settings.pop("generated_instrumental", None)
-            self.project.settings.pop("build_report", None)
-        elif self.current_step == 5:
-            self.project.master_path = ""
-        self.snapshot(f"Cleared step {self.current_step + 1}")
-        self.sync_ui_from_project()
-
-    def reset_project(self):
-        answer = QMessageBox.question(
-            self,
-            "Reset Project",
-            "Reset the project to defaults? Imported source files will not be deleted.",
-        )
-        if answer != QMessageBox.Yes:
-            return
-        self.project = ProjectState()
-        self.history = History(self.project)
-        self.sync_ui_from_project()
-        self.goto_step(0)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        local_paths = [
-            Path(url.toLocalFile())
-            for url in event.mimeData().urls()
-            if url.isLocalFile()
-        ]
-        if not local_paths:
-            return
-
-        path = local_paths[0]
-        try:
-            if path.suffix.lower() == ".drellion" and path.is_file():
-                self.load_project_path(path)
-                event.acceptProposedAction()
-                return
-
-            if path.is_dir():
-                if self.current_step == 2:
-                    self.project.sound_library_path = str(path)
-                    self.snapshot("Dropped sound library")
-                    self.sync_ui_from_project()
-                    self.steps[2].refresh()
-                event.acceptProposedAction()
-                return
-
-            if path.suffix.lower() in AUDIO_EXTENSIONS:
-                if self.current_step == 0:
-                    self.project.vocal = MediaSlot(str(path), path.name)
-                    preferred = "Vocal"
-                elif self.current_step == 1:
-                    self.project.reference = MediaSlot(str(path), path.name)
-                    preferred = "Reference"
-                elif not self.project.vocal.path:
-                    self.project.vocal = MediaSlot(str(path), path.name)
-                    preferred = "Vocal"
-                elif not self.project.reference.path:
-                    self.project.reference = MediaSlot(str(path), path.name)
-                    preferred = "Reference"
-                else:
-                    self.project.finished_song = MediaSlot(str(path), path.name)
-                    preferred = "Current"
-                    self.player.load_path(str(path), "Current")
-                self.snapshot(f"Dropped {preferred.lower()} audio")
-                self.sync_ui_from_project()
-                self.refresh_player_sources(preferred if preferred != "Current" else None)
-                event.acceptProposedAction()
-        except Exception as exc:
-            QMessageBox.critical(self, "Drop failed", str(exc))
+    def run_task(self,fn,label,on_done=None,inject_progress=True):
+        if self.current_worker:QMessageBox.information(self,"Drellion","Another task is already running."); return
+        worker=Worker(fn,inject_progress=inject_progress); self.current_worker=worker; self.task_label.setText(label); self.progress.show(); self.cancel.show(); self.cancel.setEnabled(True); worker.signals.progress.connect(self.task_label.setText)
+        def finish(result):
+            self.current_worker=None; self.progress.hide(); self.cancel.hide(); self.task_label.setText("Ready")
+            if on_done:on_done(result)
+        def error(message):
+            self.current_worker=None; self.progress.hide(); self.cancel.hide(); self.task_label.setText("Cancelled" if message=="Cancelled" else "Task failed")
+            if message!="Cancelled":QMessageBox.critical(self,"Drellion",message)
+        worker.signals.finished.connect(finish); worker.signals.error.connect(error); self.thread_pool.start(worker)
+    def cancel_task(self):
+        if self.current_worker:self.current_worker.cancel(); self.cancel.setEnabled(False); self.task_label.setText("Cancellation requested…")
+    def closeEvent(self,event):
+        if self.project:
+            try:write_autosave(self.project)
+            except Exception:pass
+        super().closeEvent(event)
+    def dragEnterEvent(self,event):
+        if event.mimeData().hasUrls():event.acceptProposedAction()
+    def dropEvent(self,event):
+        paths=[Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+        for p in paths:
+            if p.suffix.lower()==".drellion":self.open_project_path(p);return
+        if self.project:
+            for p in paths:
+                if p.is_file():
+                    try:self.project.add_source(p,role="Other")
+                    except Exception:break
+            self.project.save(); self.project_changed(); self.navigate("Sources")

@@ -1,24 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 
-class FunctionThread(QThread):
-    completed = Signal(object)
-    failed = Signal(str)
+class WorkerSignals(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(str)
 
-    def __init__(self, function: Callable, *args, **kwargs):
+
+class Worker(QRunnable):
+    def __init__(self, fn, *args, inject_progress: bool = True, **kwargs):
         super().__init__()
-        self.function = function
-        self.args = args
-        self.kwargs = kwargs
+        self.fn = fn; self.args = args; self.kwargs = kwargs; self.inject_progress = inject_progress
+        self.signals = WorkerSignals(); self.cancel_requested = False
 
+    def cancel(self): self.cancel_requested = True
+
+    def _progress(self, message: str):
+        if self.cancel_requested: raise RuntimeError("Cancelled")
+        self.signals.progress.emit(message)
+
+    @Slot()
     def run(self):
         try:
-            result = self.function(*self.args, **self.kwargs)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        else:
-            self.completed.emit(result)
+            if self.inject_progress and "progress" not in self.kwargs: self.kwargs["progress"] = self._progress
+            result = self.fn(*self.args, **self.kwargs)
+            if self.cancel_requested: raise RuntimeError("Cancelled")
+        except Exception as exc: self.signals.error.emit(str(exc))
+        else: self.signals.finished.emit(result)

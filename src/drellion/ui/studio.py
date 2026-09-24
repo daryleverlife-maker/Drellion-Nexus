@@ -2,463 +2,146 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QBrush, QColor, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QCheckBox,
-    QDialog,
-    QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
-    QPushButton,
-    QSlider,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
+    QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGraphicsItem,
+    QGraphicsRectItem, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QGroupBox, QHBoxLayout,
+    QLabel, QListWidget, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
-from ..project import TrackState
-from ..timeline import (
-    add_clip,
-    duplicate_clip,
-    ensure_track,
-    remove_clip,
-    render_timeline,
-    split_clip,
-    sync_generated_tracks,
-)
-from .player import PlayerBar
+from ..audio_core import read_wav
+from ..project import StudioClip
+from ..studio_model import add_clip, add_track, clip as find_clip, duplicate_clip, move_clip, remove_clip, set_fades, split_clip, trim_clip
+from .common import AudioTransport, Page
 
 
-class StudioWindow(QDialog):
-    COLUMNS = [
-        "Track",
-        "Clip",
-        "Start",
-        "Offset",
-        "Duration",
-        "Gain dB",
-        "Pan",
-        "Fade In",
-        "Fade Out",
-        "Mute",
-    ]
+class ClipItem(QGraphicsRectItem):
+    def __init__(self, clip: StudioClip, rect: QRectF, locked_y: float, moved_callback, selected_callback):
+        super().__init__(rect)
+        self.locked_y = float(locked_y); self.clip_id = clip.id; self.moved_callback = moved_callback; self.selected_callback = selected_callback
+        self.setBrush(QBrush(QColor(46,125,186))); self.setPen(QPen(QColor(166,215,248)))
+        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable)
+        self.setToolTip(f"{clip.label}\n{clip.source_path}")
+        label=QGraphicsTextItem(clip.label,self); label.setDefaultTextColor(QColor("white")); label.setPos(4,2)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self.setWindowTitle("Drellion Nexus — Custom Studio")
-        self.resize(1500, 900)
-        self.setModal(False)
-        self._selected_track_id = ""
-        self._selected_clip_id = ""
-        self._updating = False
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            p=value; p.setY(self.locked_y); p.setX(max(0.0,round(p.x()/10.0)*10.0)); return p
+        if change == QGraphicsItem.ItemSelectedHasChanged and bool(value): self.selected_callback(self.clip_id)
+        return super().itemChange(change,value)
 
-        sync_generated_tracks(self.main.project)
-        self.build_ui()
-        self.refresh()
+    def mouseReleaseEvent(self,event):
+        super().mouseReleaseEvent(event); self.moved_callback(self.clip_id,self.pos().x())
 
-    def build_ui(self):
-        outer = QVBoxLayout(self)
 
-        top = QHBoxLayout()
-        title = QLabel("CUSTOM STUDIO")
-        title.setStyleSheet("font-size:18pt;font-weight:700;")
-        top.addWidget(title)
-        top.addStretch()
+class TimelineView(QGraphicsView):
+    px_per_second=20.0; track_height=62.0
+    def __init__(self,studio):
+        super().__init__(); self.studio=studio; self.scene_=QGraphicsScene(self); self.setScene(self.scene_)
+        self.setAccessibleName("Multitrack timeline"); self.setMinimumHeight(300); self.setDragMode(QGraphicsView.RubberBandDrag)
 
-        controls = [
-            ("Add Audio", self.add_audio),
-            ("Sync Generated", self.sync_generated),
-            ("Duplicate Clip", self.duplicate_selected),
-            ("Split Clip", self.split_selected),
-            ("Set Fades", self.set_fades),
-            ("Remove Clip", self.remove_selected),
-            ("Render Mix", self.render_mix),
-        ]
-        for name, callback in controls:
-            button = QPushButton(name)
-            button.clicked.connect(callback)
-            top.addWidget(button)
-        outer.addLayout(top)
+    def rebuild(self):
+        self.scene_.clear(); project=self.studio.project
+        if not project:return
+        max_seconds=60.0
+        for ti,track in enumerate(project.studio_tracks):
+            y=ti*self.track_height; self.scene_.addText(track.name).setPos(0,y)
+            self.scene_.addLine(0,y+self.track_height-2,2000,y+self.track_height-2,QPen(QColor(70,80,95)))
+            for c in track.clips:
+                duration=max(c.duration_seconds,2.0); x=c.start_seconds*self.px_per_second+120; width=max(40,duration*self.px_per_second)
+                item=ClipItem(c,QRectF(0,0,width,self.track_height-12),y+4,self._moved,self.studio.select_clip); item.setPos(x,y+4); self.scene_.addItem(item)
+                max_seconds=max(max_seconds,c.start_seconds+duration)
+        for sec in range(0,int(max_seconds)+1,5):
+            x=sec*self.px_per_second+120
+            self.scene_.addLine(x,0,x,max(100,len(project.studio_tracks)*self.track_height),QPen(QColor(52,60,72)))
+            label=self.scene_.addText(f"{sec}s"); label.setPos(x+2,-22)
+        self.scene_.setSceneRect(0,-25,max_seconds*self.px_per_second+180,max(340,len(project.studio_tracks)*self.track_height+40))
 
-        center = QHBoxLayout()
+    def _moved(self,clip_id,scene_x):
+        seconds=max(0.0,(scene_x-120.0)/self.px_per_second)
+        try: move_clip(self.studio.project,clip_id,seconds); self.studio.save_and_refresh(False)
+        except Exception:self.rebuild()
 
-        track_panel = QFrame()
-        track_panel.setObjectName("Card")
-        track_layout = QVBoxLayout(track_panel)
-        track_layout.addWidget(QLabel("TRACKS"))
-        self.track_list = QListWidget()
-        self.track_list.currentItemChanged.connect(self.track_changed)
-        track_layout.addWidget(self.track_list, 1)
 
-        row = QHBoxLayout()
-        mute = QPushButton("Mute")
-        mute.clicked.connect(self.toggle_track_mute)
-        solo = QPushButton("Solo")
-        solo.clicked.connect(self.toggle_track_solo)
-        row.addWidget(mute)
-        row.addWidget(solo)
-        track_layout.addLayout(row)
-        center.addWidget(track_panel, 0)
-
-        timeline_panel = QFrame()
-        timeline_panel.setObjectName("Card")
-        timeline_layout = QVBoxLayout(timeline_panel)
-
-        timeline_layout.addWidget(
-            QLabel("TIMELINE  •  non-destructive clips  •  values are editable")
-        )
-        self.table = QTableWidget(0, len(self.COLUMNS))
-        self.table.setHorizontalHeaderLabels(self.COLUMNS)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.itemSelectionChanged.connect(self.clip_selection_changed)
-        self.table.itemChanged.connect(self.clip_item_changed)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        timeline_layout.addWidget(self.table, 1)
-        center.addWidget(timeline_panel, 1)
-
-        mixer = QFrame()
-        mixer.setObjectName("Card")
-        mixer.setFixedWidth(250)
-        mixer_layout = QVBoxLayout(mixer)
-        mixer_layout.addWidget(QLabel("SELECTED TRACK"))
-        self.track_name = QLabel("No track selected")
-        self.track_name.setWordWrap(True)
-        mixer_layout.addWidget(self.track_name)
-
-        mixer_layout.addWidget(QLabel("Volume"))
-        self.volume = QSlider(Qt.Horizontal)
-        self.volume.setRange(-240, 120)
-        self.volume.setValue(0)
-        self.volume.valueChanged.connect(self.track_mix_changed)
-        self.volume.sliderReleased.connect(lambda: self.main.snapshot("Changed Studio track volume"))
-        mixer_layout.addWidget(self.volume)
-        self.volume_value = QLabel("0.0 dB")
-        mixer_layout.addWidget(self.volume_value)
-
-        mixer_layout.addWidget(QLabel("Pan"))
-        self.pan = QSlider(Qt.Horizontal)
-        self.pan.setRange(-100, 100)
-        self.pan.setValue(0)
-        self.pan.valueChanged.connect(self.track_mix_changed)
-        self.pan.sliderReleased.connect(lambda: self.main.snapshot("Changed Studio track pan"))
-        mixer_layout.addWidget(self.pan)
-        self.pan_value = QLabel("Center")
-        mixer_layout.addWidget(self.pan_value)
-
-        self.mute_box = QCheckBox("Mute")
-        self.solo_box = QCheckBox("Solo")
-        self.mute_box.toggled.connect(self.track_flags_changed)
-        self.solo_box.toggled.connect(self.track_flags_changed)
-        mixer_layout.addWidget(self.mute_box)
-        mixer_layout.addWidget(self.solo_box)
-        mixer_layout.addStretch()
-        center.addWidget(mixer)
-
-        outer.addLayout(center, 1)
-
-        self.player = PlayerBar(self)
-        outer.addWidget(self.player)
-
-    def _track(self, track_id: str | None = None) -> TrackState | None:
-        wanted = track_id or self._selected_track_id
-        for track in self.main.project.tracks:
-            if track.id == wanted:
-                return track
-        return None
-
-    def _clip(self):
-        track = self._track()
-        if track is None:
-            return None
-        for clip in track.clips:
-            if clip.id == self._selected_clip_id:
-                return clip
-        return None
+class StudioPage(Page):
+    title="Studio"
+    def __init__(self,host):
+        super().__init__(host); self.selected_clip_id=""; root=QVBoxLayout(self); transport_row=QHBoxLayout()
+        title=QLabel("STUDIO"); title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        add_track_btn=QPushButton("+ Track"); add_audio_btn=QPushButton("+ Audio Clip"); duplicate_btn=QPushButton("Duplicate Clip"); split_btn=QPushButton("Split at Midpoint"); remove_btn=QPushButton("Remove Clip")
+        for w in (title,add_track_btn,add_audio_btn,duplicate_btn,split_btn,remove_btn): transport_row.addWidget(w)
+        transport_row.addStretch(); add_track_btn.clicked.connect(self.add_track_action); add_audio_btn.clicked.connect(self.add_audio_action); duplicate_btn.clicked.connect(self.duplicate); split_btn.clicked.connect(self.split); remove_btn.clicked.connect(self.remove); root.addLayout(transport_row)
+        self.transport=AudioTransport("Studio audition"); root.addWidget(self.transport)
+        main_split=QSplitter(Qt.Horizontal); left=QWidget(); left_l=QVBoxLayout(left); left_l.addWidget(QLabel("LIBRARY")); self.browser=QListWidget(); left_l.addWidget(self.browser)
+        self.timeline=TimelineView(self); inspector=QGroupBox("INSPECTOR"); form=QFormLayout(inspector); self.clip_name=QLabel("No clip selected")
+        self.start=QDoubleSpinBox(); self.start.setRange(0,36000); self.start.setSuffix(" s"); self.offset=QDoubleSpinBox(); self.offset.setRange(0,36000); self.offset.setSuffix(" s"); self.duration=QDoubleSpinBox(); self.duration.setRange(0,36000); self.duration.setSuffix(" s"); self.gain=QDoubleSpinBox(); self.gain.setRange(-60,24); self.gain.setSuffix(" dB"); self.fade_in=QDoubleSpinBox(); self.fade_in.setRange(0,60); self.fade_in.setSuffix(" s"); self.fade_out=QDoubleSpinBox(); self.fade_out.setRange(0,60); self.fade_out.setSuffix(" s"); self.crossfade=QDoubleSpinBox(); self.crossfade.setRange(0,60); self.crossfade.setSuffix(" s"); self.track_combo=QComboBox()
+        apply_btn=QPushButton("Apply Clip Changes"); left_btn=QPushButton("Move Left 1s"); right_btn=QPushButton("Move Right 1s"); move_buttons=QWidget(); mh=QHBoxLayout(move_buttons); mh.setContentsMargins(0,0,0,0); mh.addWidget(left_btn); mh.addWidget(right_btn)
+        for label,widget in (("Clip",self.clip_name),("Track",self.track_combo),("Start",self.start),("Source offset",self.offset),("Duration",self.duration),("Clip gain",self.gain),("Fade in",self.fade_in),("Fade out",self.fade_out),("Crossfade",self.crossfade)): form.addRow(label,widget)
+        form.addRow(move_buttons); form.addRow(apply_btn); apply_btn.clicked.connect(self.apply_clip); left_btn.clicked.connect(lambda:self.nudge(-1)); right_btn.clicked.connect(lambda:self.nudge(1))
+        main_split.addWidget(left); main_split.addWidget(self.timeline); main_split.addWidget(inspector); main_split.setSizes([190,760,260]); root.addWidget(main_split,1)
+        mixer_box=QGroupBox("MIXER"); ml=QVBoxLayout(mixer_box); self.mixer=QTableWidget(0,5); self.mixer.setHorizontalHeaderLabels(["Track","Volume dB","Pan","Mute","Solo"]); self.mixer.horizontalHeader().setStretchLastSection(True); self.mixer.setSelectionBehavior(QAbstractItemView.SelectRows); ml.addWidget(self.mixer); root.addWidget(mixer_box)
 
     def refresh(self):
-        self._updating = True
+        self.browser.clear(); self.track_combo.clear(); self.mixer.setRowCount(0)
+        if not self.project:self.timeline.rebuild(); return
+        for s in self.project.sources:self.browser.addItem(f"Source · {s.role} · {s.label}")
+        b=self.project.selected_build()
+        if b:
+            for s in b.stems:self.browser.addItem(f"Generated · {s.role}")
+        for i,t in enumerate(self.project.studio_tracks):
+            self.track_combo.addItem(t.name,t.id); self.mixer.insertRow(i); self.mixer.setItem(i,0,QTableWidgetItem(t.name))
+            vol=QDoubleSpinBox(); vol.setRange(-60,24); vol.setValue(t.volume_db); vol.setSuffix(" dB"); vol.valueChanged.connect(lambda v,tr=t:self._track_set(tr,"volume_db",v)); self.mixer.setCellWidget(i,1,vol)
+            pan=QDoubleSpinBox(); pan.setRange(-1,1); pan.setSingleStep(.05); pan.setValue(t.pan); pan.valueChanged.connect(lambda v,tr=t:self._track_set(tr,"pan",v)); self.mixer.setCellWidget(i,2,pan)
+            mute=QPushButton("Muted" if t.mute else "Mute"); mute.setCheckable(True); mute.setChecked(t.mute); mute.toggled.connect(lambda v,b=mute,tr=t:self._track_toggle(tr,"mute",v,b)); self.mixer.setCellWidget(i,3,mute)
+            solo=QPushButton("Soloed" if t.solo else "Solo"); solo.setCheckable(True); solo.setChecked(t.solo); solo.toggled.connect(lambda v,b=solo,tr=t:self._track_toggle(tr,"solo",v,b)); self.mixer.setCellWidget(i,4,solo)
+        self.timeline.rebuild()
+        if self.selected_clip_id:
+            try:self._load_inspector()
+            except KeyError:self.selected_clip_id=""; self.clip_name.setText("No clip selected")
+
+    def _track_set(self,t,field,value):setattr(t,field,value); self.save_and_refresh(False)
+    def _track_toggle(self,t,field,value,button):setattr(t,field,value); button.setText(("Muted" if field=="mute" else "Soloed") if value else ("Mute" if field=="mute" else "Solo")); self.save_and_refresh(False)
+    def save_and_refresh(self,refresh=True):
+        self.project.touch(); self.host.schedule_autosave()
+        if refresh:self.refresh()
+    def add_track_action(self):
+        if self.project:add_track(self.project,f"Track {len(self.project.studio_tracks)+1}"); self.save_and_refresh()
+    def add_audio_action(self):
+        if not self.project:return
+        if not self.project.studio_tracks:add_track(self.project,"Audio")
+        path,_=QFileDialog.getOpenFileName(self,"Add audio clip","","Audio (*.wav *.mp3 *.flac *.m4a);;All files (*)")
+        if not path:return
+        duration=0.0
+        if Path(path).suffix.lower()==".wav":
+            try:duration=read_wav(path).duration
+            except Exception:pass
+        add_clip(self.project,self.project.studio_tracks[0].id,path,Path(path).stem,duration_seconds=duration); self.save_and_refresh()
+    def select_clip(self,clip_id):
+        self.selected_clip_id=clip_id; self._load_inspector()
+        try:_t,c=find_clip(self.project,clip_id); self.transport.set_path(c.source_path)
+        except Exception:pass
+    def _load_inspector(self):
+        t,c=find_clip(self.project,self.selected_clip_id); self.clip_name.setText(c.label); idx=self.track_combo.findData(t.id); self.track_combo.setCurrentIndex(max(0,idx)); self.start.setValue(c.start_seconds); self.offset.setValue(c.source_offset_seconds); self.duration.setValue(c.duration_seconds); self.gain.setValue(c.gain_db); self.fade_in.setValue(c.fade_in_seconds); self.fade_out.setValue(c.fade_out_seconds); self.crossfade.setValue(c.crossfade_seconds)
+    def apply_clip(self):
+        if not self.selected_clip_id:return
         try:
-            self.track_list.clear()
-            for track in self.main.project.tracks:
-                flags = []
-                if track.muted:
-                    flags.append("M")
-                if track.solo:
-                    flags.append("S")
-                prefix = f"[{''.join(flags)}] " if flags else ""
-                item = QListWidgetItem(prefix + track.name)
-                item.setData(Qt.UserRole, track.id)
-                self.track_list.addItem(item)
-                if track.id == self._selected_track_id:
-                    self.track_list.setCurrentItem(item)
-
-            rows = sum(len(track.clips) for track in self.main.project.tracks)
-            self.table.setRowCount(rows)
-            row_index = 0
-            for track in self.main.project.tracks:
-                for clip in track.clips:
-                    values = [
-                        track.name,
-                        clip.label,
-                        f"{clip.start:.3f}",
-                        f"{clip.source_offset:.3f}",
-                        f"{clip.duration:.3f}",
-                        f"{clip.gain_db:.2f}",
-                        f"{clip.pan:.3f}",
-                        f"{clip.fade_in:.3f}",
-                        f"{clip.fade_out:.3f}",
-                        "Yes" if clip.muted else "No",
-                    ]
-                    for column, value in enumerate(values):
-                        item = QTableWidgetItem(value)
-                        item.setData(Qt.UserRole, (track.id, clip.id))
-                        if column == 0:
-                            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                        self.table.setItem(row_index, column, item)
-                    if track.id == self._selected_track_id and clip.id == self._selected_clip_id:
-                        self.table.selectRow(row_index)
-                    row_index += 1
-
-            self._refresh_mixer()
-        finally:
-            self._updating = False
-
-    def _refresh_mixer(self):
-        track = self._track()
-        self._updating = True
+            _t,c=find_clip(self.project,self.selected_clip_id); move_clip(self.project,c.id,self.start.value(),self.track_combo.currentData()); trim_clip(self.project,c.id,self.offset.value(),self.duration.value()); _t,c=find_clip(self.project,c.id); c.gain_db=self.gain.value(); set_fades(self.project,c.id,self.fade_in.value(),self.fade_out.value(),self.crossfade.value()); self.save_and_refresh()
+        except Exception as exc:QMessageBox.warning(self,"Studio",str(exc))
+    def nudge(self,seconds):
+        if not self.selected_clip_id:return
+        _t,c=find_clip(self.project,self.selected_clip_id); move_clip(self.project,c.id,max(0,c.start_seconds+seconds)); self.save_and_refresh()
+    def duplicate(self):
+        if not self.selected_clip_id:return
+        clone=duplicate_clip(self.project,self.selected_clip_id,0.25); self.selected_clip_id=clone.id; self.save_and_refresh()
+    def split(self):
+        if not self.selected_clip_id:return
         try:
-            if track is None:
-                self.track_name.setText("No track selected")
-                self.volume.setValue(0)
-                self.pan.setValue(0)
-                self.mute_box.setChecked(False)
-                self.solo_box.setChecked(False)
-                return
-            self.track_name.setText(track.name)
-            self.volume.setValue(round(track.volume_db * 10))
-            self.pan.setValue(round(track.pan * 100))
-            self.mute_box.setChecked(track.muted)
-            self.solo_box.setChecked(track.solo)
-            self.volume_value.setText(f"{track.volume_db:.1f} dB")
-            self.pan_value.setText(
-                "Center" if abs(track.pan) < 0.01 else f"{'L' if track.pan < 0 else 'R'} {abs(track.pan):.2f}"
-            )
-        finally:
-            self._updating = False
-
-    def track_changed(self, current, previous):
-        if current is None:
-            return
-        self._selected_track_id = current.data(Qt.UserRole) or ""
-        self._selected_clip_id = ""
-        self._refresh_mixer()
-
-    def clip_selection_changed(self):
-        items = self.table.selectedItems()
-        if not items:
-            return
-        ids = items[0].data(Qt.UserRole)
-        if not ids:
-            return
-        self._selected_track_id, self._selected_clip_id = ids
-        self._refresh_mixer()
-
-    def clip_item_changed(self, item):
-        if self._updating:
-            return
-        ids = item.data(Qt.UserRole)
-        if not ids:
-            return
-        track = self._track(ids[0])
-        if track is None:
-            return
-        clip = next((clip for clip in track.clips if clip.id == ids[1]), None)
-        if clip is None:
-            return
-
-        try:
-            value = item.text().strip()
-            column = item.column()
-            if column == 1:
-                clip.label = value or clip.label
-            elif column == 2:
-                clip.start = max(0.0, float(value))
-            elif column == 3:
-                clip.source_offset = max(0.0, float(value))
-            elif column == 4:
-                clip.duration = max(0.0, float(value))
-            elif column == 5:
-                clip.gain_db = min(24.0, max(-60.0, float(value)))
-            elif column == 6:
-                clip.pan = min(1.0, max(-1.0, float(value)))
-            elif column == 7:
-                clip.fade_in = max(0.0, float(value))
-            elif column == 8:
-                clip.fade_out = max(0.0, float(value))
-            elif column == 9:
-                clip.muted = value.lower() in {"yes", "true", "1", "mute", "muted"}
-            self.main.snapshot("Edited Studio clip")
-        except ValueError:
-            QMessageBox.warning(self, "Invalid value", "Enter a valid numeric value.")
-        self.refresh()
-
-    def add_audio(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Add Audio to Studio",
-            "",
-            "Audio (*.wav *.flac *.mp3 *.m4a *.aac *.ogg *.opus *.aiff *.aif *.wma)",
-        )
-        if not path:
-            return
-
-        track = self._track()
-        if track is None:
-            name, ok = QInputDialog.getText(self, "Track Name", "Track name:", text=Path(path).stem)
-            if not ok:
-                return
-            track = TrackState(name=name or Path(path).stem, role="audio")
-            self.main.project.tracks.append(track)
-            self._selected_track_id = track.id
-
-        clip = add_clip(track, path)
-        self._selected_clip_id = clip.id
-        self.main.snapshot("Added Studio audio")
-        self.refresh()
-
-    def sync_generated(self):
-        sync_generated_tracks(self.main.project)
-        self.main.snapshot("Synced generated Studio tracks")
-        self.refresh()
-
-    def duplicate_selected(self):
-        track = self._track()
-        clip = self._clip()
-        if track is None or clip is None:
-            QMessageBox.information(self, "Duplicate", "Select a clip first.")
-            return
-        clone = duplicate_clip(track, clip.id, offset=max(0.25, clip.duration))
-        self._selected_clip_id = clone.id
-        self.main.snapshot("Duplicated Studio clip")
-        self.refresh()
-
-    def split_selected(self):
-        track = self._track()
-        clip = self._clip()
-        if track is None or clip is None:
-            QMessageBox.information(self, "Split", "Select a clip first.")
-            return
-        default = clip.start + (clip.duration / 2.0 if clip.duration > 0 else 0.0)
-        position, ok = QInputDialog.getDouble(
-            self,
-            "Split Clip",
-            "Timeline position (seconds):",
-            default,
-            0.0,
-            86400.0,
-            3,
-        )
-        if not ok:
-            return
-        try:
-            left, right = split_clip(track, clip.id, position)
-            self._selected_clip_id = right.id
-            self.main.snapshot("Split Studio clip")
-            self.refresh()
-        except Exception as exc:
-            QMessageBox.warning(self, "Split failed", str(exc))
-
-    def set_fades(self):
-        clip = self._clip()
-        if clip is None:
-            QMessageBox.information(self, "Fades", "Select a clip first.")
-            return
-        fade_in, ok = QInputDialog.getDouble(
-            self, "Fade In", "Fade-in seconds:", clip.fade_in, 0.0, 60.0, 3
-        )
-        if not ok:
-            return
-        fade_out, ok = QInputDialog.getDouble(
-            self, "Fade Out", "Fade-out seconds:", clip.fade_out, 0.0, 60.0, 3
-        )
-        if not ok:
-            return
-        clip.fade_in = fade_in
-        clip.fade_out = fade_out
-        self.main.snapshot("Changed Studio fades")
-        self.refresh()
-
-    def remove_selected(self):
-        track = self._track()
-        clip = self._clip()
-        if track is None or clip is None:
-            QMessageBox.information(self, "Remove", "Select a clip first.")
-            return
-        remove_clip(track, clip.id)
-        self._selected_clip_id = ""
-        self.main.snapshot("Removed Studio clip")
-        self.refresh()
-
-    def toggle_track_mute(self):
-        track = self._track()
-        if track is None:
-            return
-        track.muted = not track.muted
-        self.main.snapshot("Toggled Studio track mute")
-        self.refresh()
-
-    def toggle_track_solo(self):
-        track = self._track()
-        if track is None:
-            return
-        track.solo = not track.solo
-        self.main.snapshot("Toggled Studio track solo")
-        self.refresh()
-
-    def track_mix_changed(self):
-        if self._updating:
-            return
-        track = self._track()
-        if track is None:
-            return
-        track.volume_db = self.volume.value() / 10.0
-        track.pan = self.pan.value() / 100.0
-        self.volume_value.setText(f"{track.volume_db:.1f} dB")
-        self.pan_value.setText(
-            "Center" if abs(track.pan) < 0.01 else f"{'L' if track.pan < 0 else 'R'} {abs(track.pan):.2f}"
-        )
-        self.main.project.touch()
-
-    def track_flags_changed(self):
-        if self._updating:
-            return
-        track = self._track()
-        if track is None:
-            return
-        track.muted = self.mute_box.isChecked()
-        track.solo = self.solo_box.isChecked()
-        self.main.snapshot("Changed Studio mute/solo")
-        self.refresh()
-
-    def render_mix(self):
-        try:
-            sync_generated_tracks(self.main.project)
-            target = self.main.project_output_dir() / "Studio" / "studio-mix.wav"
-            output = render_timeline(self.main.project, target)
-            self.main.project.settings["studio_mix"] = str(output)
-            self.main.snapshot("Rendered Studio mix")
-            self.player.load_path(str(output), "Studio Mix")
-            self.player.player.play()
-            self.main.player.load_path(str(output), "Studio Mix")
-            QMessageBox.information(self, "Studio render complete", str(output))
-        except Exception as exc:
-            QMessageBox.critical(self, "Studio render failed", str(exc))
+            _t,c=find_clip(self.project,self.selected_clip_id)
+            if c.duration_seconds<=0:raise ValueError("Set clip duration before splitting")
+            _left,right=split_clip(self.project,c.id,c.start_seconds+c.duration_seconds/2); self.selected_clip_id=right.id; self.save_and_refresh()
+        except Exception as exc:QMessageBox.warning(self,"Studio",str(exc))
+    def remove(self):
+        if not self.selected_clip_id:return
+        remove_clip(self.project,self.selected_clip_id); self.selected_clip_id=""; self.save_and_refresh()
