@@ -26,6 +26,7 @@ class QCResult:
     metrics: QCMetrics
     checks: dict[str, bool] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -33,6 +34,7 @@ class QCResult:
             "metrics": asdict(self.metrics),
             "checks": self.checks,
             "reasons": self.reasons,
+            "warnings": self.warnings,
         }
 
 
@@ -117,5 +119,9 @@ def evaluate_preview(instrumental_path: str | Path, vocal_path: str | Path | Non
     }
     if metrics.vocal_to_music_db is not None:
         checks["vocal_balance"] = -12.0 <= metrics.vocal_to_music_db <= 18.0
-    reasons = [name.replace("_", " ") for name, ok in checks.items() if not ok]
-    return QCResult(all(checks.values()), metrics, checks, reasons)
+    hard_checks = ("no_clipping", "not_silent", "stereo_phase", "not_excessively_repetitive")
+    soft_checks = ("bass_foundation", "drum_activity", "vocal_balance")
+    reasons = [name.replace("_", " ") for name in hard_checks if name in checks and not checks[name]]
+    warnings = [name.replace("_", " ") for name in soft_checks if name in checks and not checks[name]]
+    accepted = all(checks.get(name, True) for name in hard_checks)
+    return QCResult(accepted, metrics, checks, reasons, warnings)
