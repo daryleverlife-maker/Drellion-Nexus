@@ -52,6 +52,8 @@ def test_preview_build_master_pipeline(tmp_path: Path):
     state.reference.path = str(reference)
     state.selected_preview = "Preview B"
     state.settings["target_lufs"] = -14.0
+    state.settings["generation_provider"] = "basic_test"
+    state.settings["enable_basic_test_engine"] = True
 
     engine = NexusEngine()
 
