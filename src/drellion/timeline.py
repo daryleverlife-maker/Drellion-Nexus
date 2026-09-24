@@ -173,3 +173,29 @@ def render_timeline(project: ProjectState, target_path: str | Path) -> Path:
     if result.returncode:
         raise RuntimeError(result.stderr[-5000:] or "Studio render failed.")
     return target
+
+
+def render_track_stem(project: ProjectState, track_id: str, target_path: str | Path) -> Path:
+    clone = deepcopy(project)
+    found = False
+    for track in clone.tracks:
+        track.solo = track.id == track_id
+        track.muted = track.id != track_id
+        if track.id == track_id:
+            found = True
+    if not found:
+        raise ValueError(f'Unknown track id: {track_id}')
+    return render_timeline(clone, target_path)
+
+
+def render_all_stems(project: ProjectState, output_dir: str | Path) -> list[Path]:
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    for index, track in enumerate(project.tracks, start=1):
+        if not track.clips:
+            continue
+        safe = ''.join(ch if ch.isalnum() or ch in ' ._-' else '_' for ch in track.name).strip() or f'Track {index}'
+        target = root / f'{index:02d} - {safe}.wav'
+        outputs.append(render_track_stem(project, track.id, target))
+    return outputs
