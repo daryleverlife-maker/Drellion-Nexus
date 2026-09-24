@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 import base64
+import json
 import shutil
 import subprocess
 import tempfile
@@ -83,7 +84,8 @@ class AceStepHttpProvider:
                 response = self.session.get(f"{self.base_url}/health", timeout=min(self.timeout, 8))
             response.raise_for_status()
             payload = response.json() if "json" in response.headers.get("content-type", "") else {}
-            version = str(payload.get("version") or payload.get("model") or "") if isinstance(payload, dict) else ""
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            version = str(data.get("version") or data.get("model") or "") if isinstance(data, dict) else ""
             return EngineStatus(self.name, True, "Ready", version=version, mode="HTTP")
         except Exception as exc:
             return EngineStatus(self.name, False, str(exc), mode="HTTP")
@@ -95,46 +97,89 @@ class AceStepHttpProvider:
         out_dir.mkdir(parents=True, exist_ok=True)
         if progress:
             progress("Submitting to ACE-Step")
-        payload: dict[str, Any] = {
+
+        data: dict[str, str] = {
             "task_type": request.task,
             "prompt": request.prompt,
             "lyrics": request.lyrics,
-            "seed": int(request.seed),
-            "audio_duration": request.duration_seconds,
-            "audio_cover_strength": float(request.reference_strength),
-            "src_audio": _file_to_data_url(request.source_audio),
+            "seed": str(int(request.seed)),
+            "use_random_seed": "false",
+            "audio_format": "wav",
+            "audio_cover_strength": str(float(request.reference_strength)),
         }
-        refs = [p for p in request.reference_audio if p and Path(p).exists()]
-        if refs:
-            payload["reference_audio"] = _file_to_data_url(refs[0])
-        response = self.session.post(f"{self.base_url}/release_task", json=payload, timeout=self.timeout)
-        response.raise_for_status()
+        if request.duration_seconds is not None:
+            data["audio_duration"] = str(float(request.duration_seconds))
+        if request.task in {"text2music", "lego", "complete"}:
+            data["thinking"] = "true"
+
+        handles: list[Any] = []
+        files: dict[str, Any] = {}
+        try:
+            source_path = Path(request.source_audio)
+            source_handle = source_path.open("rb")
+            handles.append(source_handle)
+            files["src_audio"] = (source_path.name, source_handle, "application/octet-stream")
+            refs = [Path(x) for x in request.reference_audio if x and Path(x).exists()]
+            if refs:
+                ref_handle = refs[0].open("rb")
+                handles.append(ref_handle)
+                files["reference_audio"] = (refs[0].name, ref_handle, "application/octet-stream")
+
+            response = self.session.post(
+                f"{self.base_url}/release_task",
+                data=data,
+                files=files,
+                timeout=max(self.timeout, 120),
+            )
+            response.raise_for_status()
+        finally:
+            for handle in handles:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
         created = response.json()
-        task_id = created.get("task_id") or created.get("id") or created.get("data")
-        if isinstance(task_id, dict):
-            task_id = task_id.get("task_id") or task_id.get("id")
+        created_data = created.get("data", created) if isinstance(created, dict) else created
+        task_id = None
+        if isinstance(created_data, dict):
+            task_id = created_data.get("task_id") or created_data.get("id")
+        elif isinstance(created_data, str):
+            task_id = created_data
         if not task_id:
             raise RuntimeError(f"ACE-Step did not return a task id: {created}")
+
         deadline = time.monotonic() + max(180.0, (request.duration_seconds or 30.0) * 12.0)
-        result_payload: dict[str, Any] | None = None
+        result_payload: Any = None
         while time.monotonic() < deadline:
             if progress:
                 progress("ACE-Step is generating")
-            q = self.session.get(f"{self.base_url}/query_result", params={"task_id": task_id}, timeout=self.timeout)
-            if q.status_code == 405:
-                q = self.session.post(f"{self.base_url}/query_result", json={"task_id": task_id}, timeout=self.timeout)
+            q = self.session.post(
+                f"{self.base_url}/query_result",
+                json={"task_id_list": [str(task_id)]},
+                timeout=self.timeout,
+            )
             q.raise_for_status()
-            status = q.json()
-            state = str(status.get("status") or status.get("state") or "").lower()
-            if state in {"failed", "error", "cancelled"}:
-                raise RuntimeError(str(status.get("error") or status.get("message") or status))
-            candidates = status.get("result") or status.get("data") or status.get("outputs")
-            if state in {"success", "completed", "done", "finished"} or candidates:
-                result_payload = status
+            payload = q.json()
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            entries = payload.get("data", payload) if isinstance(payload, dict) else payload
+            if isinstance(entries, dict):
+                entries = [entries]
+            entry = entries[0] if isinstance(entries, list) and entries else {}
+            if not isinstance(entry, dict):
+                entry = {}
+            state = entry.get("status")
+            if state in (2, "2", "failed", "error", "cancelled"):
+                raise RuntimeError(str(entry.get("error") or entry.get("message") or entry))
+            if state in (1, "1", "success", "completed", "done", "finished"):
+                result_payload = entry
                 break
             time.sleep(self.poll_seconds)
+
         if result_payload is None:
             raise TimeoutError("ACE-Step generation timed out")
+
         audio_url = _extract_audio_url(result_payload)
         audio_path = out_dir / f"ace-{request.seed}.wav"
         if not audio_url:
@@ -147,12 +192,20 @@ class AceStepHttpProvider:
                 audio_url = self.base_url + audio_url
             _download(self.session, audio_url, audio_path)
         status = self.status()
-        return GenerationResult(self.name, status.version, str(audio_path), seed=request.seed, metadata={"task_id": task_id})
+        return GenerationResult(self.name, status.version, str(audio_path), seed=request.seed, metadata={"task_id": str(task_id)})
 
 
 def _extract_audio_url(payload: Any) -> str | None:
     if isinstance(payload, str):
-        return payload if payload.startswith(("http://", "https://", "/", "data:")) else None
+        stripped = payload.strip()
+        if stripped.startswith(("http://", "https://", "/", "data:")):
+            return stripped
+        if stripped.startswith(("[", "{")):
+            try:
+                return _extract_audio_url(json.loads(stripped))
+            except json.JSONDecodeError:
+                return None
+        return None
     if isinstance(payload, list):
         for item in payload:
             found = _extract_audio_url(item)
