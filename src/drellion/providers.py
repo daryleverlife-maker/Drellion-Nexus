@@ -135,6 +135,168 @@ class AceStepProvider(RemoteHttpProvider):
             headers['Content-Type'] = content_type
         return headers
 
+    def _download_audio_refs(
+        self,
+        settings: dict[str, Any],
+        endpoint: str,
+        refs: list[str],
+        output_dir: str | Path,
+        batch_size: int,
+    ) -> list[Path]:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        downloaded: list[Path] = []
+        for index, file_ref in enumerate(refs[:batch_size], start=1):
+            if not file_ref:
+                continue
+            url = file_ref if file_ref.startswith('http') else endpoint + file_ref
+            req = urllib.request.Request(url, headers=self._headers(settings))
+            with urllib.request.urlopen(req, timeout=180.0) as response:
+                data = response.read()
+            parsed = urllib.parse.urlparse(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            path_hint = query.get('path', [''])[0]
+            suffix = Path(path_hint or parsed.path).suffix or '.flac'
+            target = out / f'ace-preview-{index}{suffix}'
+            target.write_bytes(data)
+            downloaded.append(target)
+        return downloaded
+
+    @staticmethod
+    def _modern_result_refs(payload: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for key in ('audio_paths', 'files', 'outputs'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        refs.append(item)
+                    elif isinstance(item, dict):
+                        ref = item.get('file') or item.get('url') or item.get('path')
+                        if ref:
+                            refs.append(str(ref))
+        for key in ('first_audio_path', 'second_audio_path', 'audio_path'):
+            value = payload.get(key)
+            if value:
+                refs.append(str(value))
+        result = payload.get('result')
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                result = None
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, str):
+                    refs.append(item)
+                elif isinstance(item, dict):
+                    ref = item.get('file') or item.get('url') or item.get('path')
+                    if ref:
+                        refs.append(str(ref))
+        elif isinstance(result, dict):
+            refs.extend(AceStepProvider._modern_result_refs(result))
+        seen = set()
+        return [x for x in refs if x and not (x in seen or seen.add(x))]
+
+    def _generate_modern(
+        self,
+        settings: dict[str, Any],
+        endpoint: str,
+        fields: dict[str, str],
+        files: dict[str, Path],
+        output_dir: str | Path,
+        batch_size: int,
+        timeout: float,
+    ) -> list[Path]:
+        body, content_type = self._multipart(fields, files)
+        request = urllib.request.Request(
+            endpoint + '/v1/music/generate',
+            data=body,
+            method='POST',
+            headers=self._headers(settings, content_type),
+        )
+        with urllib.request.urlopen(request, timeout=120.0) as response:
+            created = json.loads(response.read().decode('utf-8'))
+        job_id = created.get('job_id') or (created.get('data') or {}).get('job_id')
+        if not job_id:
+            raise RuntimeError(f'ACE-Step modern API did not return a job_id: {created}')
+
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            request = urllib.request.Request(
+                endpoint + '/v1/jobs/' + urllib.parse.quote(str(job_id), safe=''),
+                headers=self._headers(settings),
+            )
+            with urllib.request.urlopen(request, timeout=30.0) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+            data = payload.get('data') if isinstance(payload.get('data'), dict) else payload
+            status = str(data.get('status', '') or '').lower()
+            if status == 'failed':
+                raise RuntimeError(data.get('error') or 'ACE-Step generation failed.')
+            if status == 'succeeded':
+                refs = self._modern_result_refs(data)
+                downloaded = self._download_audio_refs(settings, endpoint, refs, output_dir, batch_size)
+                if downloaded:
+                    return downloaded
+                raise RuntimeError(f'ACE-Step succeeded but returned no audio URLs: {data}')
+            time.sleep(2.0)
+        raise TimeoutError('ACE-Step modern API generation timed out.')
+
+    def _generate_legacy(
+        self,
+        settings: dict[str, Any],
+        endpoint: str,
+        fields: dict[str, str],
+        files: dict[str, Path],
+        output_dir: str | Path,
+        batch_size: int,
+        timeout: float,
+    ) -> list[Path]:
+        body, content_type = self._multipart(fields, files)
+        request = urllib.request.Request(
+            endpoint + '/release_task',
+            data=body,
+            method='POST',
+            headers=self._headers(settings, content_type),
+        )
+        with urllib.request.urlopen(request, timeout=120.0) as response:
+            created = json.loads(response.read().decode('utf-8'))
+        task_id = (created.get('data') or {}).get('task_id')
+        if not task_id:
+            raise RuntimeError(f'ACE-Step legacy API did not return a task id: {created}')
+
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            payload = json.dumps({'task_id_list': [task_id]}).encode('utf-8')
+            query = urllib.request.Request(
+                endpoint + '/query_result',
+                data=payload,
+                method='POST',
+                headers=self._headers(settings, 'application/json'),
+            )
+            with urllib.request.urlopen(query, timeout=30.0) as response:
+                status_payload = json.loads(response.read().decode('utf-8'))
+            entries = status_payload.get('data') or []
+            entry = entries[0] if entries else {}
+            status = int(entry.get('status', 0) or 0)
+            if status == 2:
+                raise RuntimeError(entry.get('error') or 'ACE-Step generation failed.')
+            if status == 1:
+                raw_result = entry.get('result', '[]')
+                result = json.loads(raw_result) if isinstance(raw_result, str) else (raw_result or [])
+                refs = []
+                for item in result:
+                    if isinstance(item, str):
+                        refs.append(item)
+                    elif isinstance(item, dict) and item.get('file'):
+                        refs.append(str(item['file']))
+                downloaded = self._download_audio_refs(settings, endpoint, refs, output_dir, batch_size)
+                if downloaded:
+                    return downloaded
+                raise RuntimeError('ACE-Step legacy API completed but returned no downloadable audio.')
+            time.sleep(2.0)
+        raise TimeoutError('ACE-Step legacy API generation timed out.')
+
     def generate_complete(
         self,
         settings: dict[str, Any],
@@ -165,7 +327,9 @@ class AceStepProvider(RemoteHttpProvider):
 
         fields = {
             'task_type': 'complete',
+            # Both names are accepted by different ACE-Step HTTP generations.
             'prompt': prompt,
+            'caption': prompt,
             'lyrics': lyrics or '',
             'audio_duration': f'{max(4.0, float(duration)):.3f}',
             'batch_size': str(max(1, min(8, int(batch_size)))),
@@ -177,68 +341,34 @@ class AceStepProvider(RemoteHttpProvider):
         if bpm and bpm > 0:
             fields['bpm'] = str(round(float(bpm)))
 
-        body, content_type = self._multipart(fields, files)
-        request = urllib.request.Request(
-            endpoint + '/release_task',
-            data=body,
-            method='POST',
-            headers=self._headers(settings, content_type),
+        preference = str(settings.get('provider_ace_step_api', 'auto') or 'auto').lower()
+        errors: list[str] = []
+        order = ('modern', 'legacy') if preference == 'auto' else (preference,)
+        for mode in order:
+            try:
+                if mode == 'modern':
+                    return self._generate_modern(
+                        settings, endpoint, fields, files, output_dir, batch_size, timeout
+                    )
+                if mode == 'legacy':
+                    return self._generate_legacy(
+                        settings, endpoint, fields, files, output_dir, batch_size, timeout
+                    )
+                raise ValueError(f'Unknown ACE-Step API mode: {mode}')
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode('utf-8', errors='replace')[-1200:]
+                errors.append(f'{mode}: HTTP {exc.code} {detail}')
+                if preference != 'auto' or exc.code not in {404, 405, 422}:
+                    break
+            except (RuntimeError, ValueError) as exc:
+                errors.append(f'{mode}: {exc}')
+                if preference != 'auto':
+                    break
+
+        raise RuntimeError(
+            'ACE-Step endpoint could not generate with a supported API variant. '
+            + ' | '.join(errors)
         )
-        try:
-            with urllib.request.urlopen(request, timeout=120.0) as response:
-                created = json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode('utf-8', errors='replace')[-4000:]
-            raise RuntimeError(f'ACE-Step task creation failed ({exc.code}): {detail}') from exc
-
-        task_id = ((created.get('data') or {}).get('task_id'))
-        if not task_id:
-            raise RuntimeError(f'ACE-Step did not return a task id: {created}')
-
-        started = time.monotonic()
-        results: list[dict[str, Any]] = []
-        while time.monotonic() - started < timeout:
-            payload = json.dumps({'task_id_list': [task_id]}).encode('utf-8')
-            query = urllib.request.Request(
-                endpoint + '/query_result',
-                data=payload,
-                method='POST',
-                headers=self._headers(settings, 'application/json'),
-            )
-            with urllib.request.urlopen(query, timeout=30.0) as response:
-                status_payload = json.loads(response.read().decode('utf-8'))
-            entries = (status_payload.get('data') or [])
-            entry = entries[0] if entries else {}
-            status = int(entry.get('status', 0) or 0)
-            if status == 2:
-                raise RuntimeError(entry.get('error') or 'ACE-Step generation failed.')
-            if status == 1:
-                raw_result = entry.get('result', '[]')
-                results = json.loads(raw_result) if isinstance(raw_result, str) else (raw_result or [])
-                break
-            time.sleep(2.0)
-        else:
-            raise TimeoutError('ACE-Step generation timed out.')
-
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        downloaded: list[Path] = []
-        for index, item in enumerate(results[:batch_size], start=1):
-            file_ref = str(item.get('file', '') or '')
-            if not file_ref:
-                continue
-            url = file_ref if file_ref.startswith('http') else endpoint + file_ref
-            req = urllib.request.Request(url, headers=self._headers(settings))
-            with urllib.request.urlopen(req, timeout=120.0) as response:
-                data = response.read()
-            suffix = Path(urllib.parse.urlparse(url).path).suffix or '.flac'
-            target = out / f'ace-preview-{index}{suffix}'
-            target.write_bytes(data)
-            downloaded.append(target)
-
-        if not downloaded:
-            raise RuntimeError('ACE-Step completed but returned no downloadable audio.')
-        return downloaded
 
 
 class DiffRhythmProvider(RemoteHttpProvider):
