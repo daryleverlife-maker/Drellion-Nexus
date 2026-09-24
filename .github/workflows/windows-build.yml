@@ -96,14 +96,26 @@ jobs:
             "$hash  $file" | Out-File -FilePath checksums.sha256 -Append -Encoding ascii
           }
 
-      - name: Upload Windows artifact
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Windows
-          path: |
-            dist/DrellionNexus/**
-            Drellion-Nexus-Portable.zip
-            installer-output/Drellion-Nexus-Setup.exe
-            checksums.sha256
+          name: Drellion-Nexus-Installer
+          path: installer-output/Drellion-Nexus-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Drellion-Nexus-Portable
+          path: Drellion-Nexus-Portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: Drellion-Nexus-Checksums
+          path: checksums.sha256
           if-no-files-found: error
           retention-days: 14
