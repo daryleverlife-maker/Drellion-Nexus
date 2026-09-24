@@ -122,6 +122,9 @@ def master_audio(
     source_analysis: ReferenceAnalysis | None = None,
     reference_analysis: ReferenceAnalysis | None = None,
     reference_influence: str = "Strong",
+    custom_reference_strength: float | None = None,
+    custom_punch: float = 0.5,
+    custom_width: float = 0.5,
 ) -> Path:
     source = Path(source_path)
     target = Path(target_path)
@@ -136,6 +139,10 @@ def master_audio(
         "balanced": 0.65,
         "strong": 1.0,
     }.get((reference_influence or "Strong").strip().lower(), 1.0)
+    if custom_reference_strength is not None:
+        influence = max(0.0, min(1.0, float(custom_reference_strength)))
+    punch = max(0.0, min(1.0, float(custom_punch)))
+    width_control = max(0.0, min(1.0, float(custom_width)))
 
     filters = ["highpass=f=25"]
 
@@ -167,7 +174,8 @@ def master_audio(
         reference_width = reference_analysis.stereo.get("side_mid_db")
         if source_width is not None and reference_width is not None:
             width_delta_db = (reference_width - source_width) * influence
-            multiplier = 10.0 ** (width_delta_db / 20.0)
+            width_mix = 0.35 + (width_control * 0.65)
+            multiplier = 10.0 ** ((width_delta_db * width_mix) / 20.0)
             multiplier = max(0.60, min(1.40, multiplier))
             if abs(multiplier - 1.0) >= 0.02:
                 filters.append(f"extrastereo=m={multiplier:.4f}:c=0")
@@ -176,11 +184,18 @@ def master_audio(
         reference_lra = float(reference_analysis.dynamics.get("lra", 0.0) or 0.0)
         if source_lra > reference_lra + 0.8 and reference_lra > 0:
             difference = min(8.0, source_lra - reference_lra)
-            ratio = 1.0 + min(2.0, (difference / 4.0) * influence)
+            ratio = 1.0 + min(2.5, (difference / 4.0) * influence * (0.75 + punch * 0.75))
             filters.append(
                 f"acompressor=threshold=-16dB:ratio={ratio:.3f}:"
                 "attack=15:release=120:makeup=0"
             )
+
+    if punch > 0.55:
+        extra_ratio = 1.15 + (punch - 0.55) * 1.8
+        filters.append(
+            f"acompressor=threshold=-10dB:ratio={extra_ratio:.3f}:"
+            "attack=8:release=85:makeup=0"
+        )
 
     filters.extend(
         [
