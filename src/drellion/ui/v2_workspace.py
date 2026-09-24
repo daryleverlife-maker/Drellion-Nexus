@@ -20,6 +20,9 @@ from ..stems import available_stem_engines
 from ..youtube import fetch_oembed
 from ..library import SoundLibrary
 from ..master_v2 import master_v2
+from ..lyrics_v2 import align_and_write, to_srt
+from ..lyrics import to_lrc
+from ..transcription import FasterWhisperTranscriber
 from .studio import StudioWindow
 from .player import PlayerBar
 from .worker import FunctionThread
@@ -718,13 +721,93 @@ class ExportPage(QWidget):
         worker.deleteLater()
 
 
+class LyricsPage(QWidget):
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project=project; self._workers=[]
+        root=QVBoxLayout(self)
+        title=QLabel("LYRICS & TIMING"); title.setObjectName("PageTitle"); root.addWidget(title)
+        note=QLabel("Paste lyrics, align them to the lead vocal, or transcribe with the optional faster-whisper model pack.")
+        note.setWordWrap(True); root.addWidget(note)
+        self.editor=QTextEdit(); self.editor.setPlainText(project.lyrics); self.editor.setPlaceholderText("Paste or type lyrics here…")
+        root.addWidget(self.editor,1)
+        row=QHBoxLayout()
+        save=QPushButton("Save Lyrics"); save.clicked.connect(self.sync)
+        align=QPushButton("Align + Create LRC/SRT"); align.clicked.connect(self.align)
+        transcribe=QPushButton("Transcribe Lead Vocal"); transcribe.clicked.connect(self.transcribe)
+        row.addWidget(save); row.addWidget(align); row.addWidget(transcribe); row.addStretch(1); root.addLayout(row)
+        self.status=QLabel(""); root.addWidget(self.status)
+
+    def _vocal_path(self):
+        for source in self.project.sources:
+            if source.enabled and source.path and source.role=="Lead Vocal":
+                return source.path
+        return self.project.vocal.path
+
+    def sync(self):
+        self.project.lyrics=self.editor.toPlainText()
+        self.project.touch()
+        self.status.setText("Lyrics saved in project.")
+
+    def align(self):
+        self.sync()
+        vocal=self._vocal_path()
+        if not vocal:
+            QMessageBox.information(self,"Lyrics","Add a lead vocal first.")
+            return
+        out=self.project.ensure_layout()["lyrics"]
+        try:
+            cues,lrc,srt=align_and_write(self.project.lyrics,vocal,out)
+            self.project.settings["lyrics_lrc_path"]=str(lrc)
+            self.project.settings["lyrics_srt_path"]=str(srt)
+            self.project.settings["lyrics_cue_count"]=len(cues)
+            self.project.touch()
+            self.status.setText(f"Aligned {len(cues)} lyric cues.")
+        except Exception as exc:
+            QMessageBox.critical(self,"Lyric alignment failed",str(exc))
+
+    def transcribe(self):
+        vocal=self._vocal_path()
+        if not vocal:
+            QMessageBox.information(self,"Transcription","Add a lead vocal first.")
+            return
+        transcriber=FasterWhisperTranscriber()
+        if not transcriber.available():
+            QMessageBox.information(self,"Transcription","faster-whisper is not installed. The normal lyric alignment tools still work.")
+            return
+        self.status.setText("Transcribing…")
+        worker=FunctionThread(transcriber.transcribe,vocal,str(self.project.settings.get("whisper_model","small")))
+        self._workers.append(worker)
+        worker.completed.connect(lambda result,w=worker:self._transcribed(result,w))
+        worker.failed.connect(lambda message,w=worker:self._transcribe_failed(message,w)); worker.start()
+
+    def _transcribed(self,result,worker):
+        self.editor.setPlainText(result.text)
+        self.project.lyrics=result.text
+        out=self.project.ensure_layout()["lyrics"]
+        lrc=out/"lyrics-whisper.lrc"; lrc.write_text(to_lrc(result.cues),encoding="utf-8")
+        srt=out/"lyrics-whisper.srt"; srt.write_text(to_srt(result.cues),encoding="utf-8")
+        self.project.settings["lyrics_lrc_path"]=str(lrc)
+        self.project.settings["lyrics_srt_path"]=str(srt)
+        self.project.settings["lyrics_language"]=result.language
+        self.project.touch()
+        self.status.setText(f"Transcribed {len(result.cues)} timed words/cues.")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _transcribe_failed(self,message,worker):
+        self.status.setText("Transcription failed.")
+        QMessageBox.critical(self,"Transcription failed",message)
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+
+
 class V2Workspace(QWidget):
     open_project_requested = Signal(str)
 
     NAV = [
         ("Dashboard", 0), ("Sources", 1), ("References", 2), ("Direction", 3), ("Previews", 4),
         ("Build", 5), ("Master", 6), ("Studio", 7), ("Library", 8),
-        ("Export", 9), ("Versions", 10), ("Storage", 11), ("AI Engines", 12), ("Project Health", 13),
+        ("Export", 9), ("Versions", 10), ("Storage", 11), ("AI Engines", 12), ("Project Health", 13), ("Lyrics & Timing", 14),
     ]
 
     def __init__(self, project: ProjectState, storage: StorageSettings, accessibility: AccessibilitySettings, parent=None):
@@ -764,6 +847,7 @@ class V2Workspace(QWidget):
         self.storage_page=StoragePage(storage); self.stack.addWidget(self.storage_page)
         self.engines_page=EnginesPage(project); self.stack.addWidget(self.engines_page)
         self.health_page=HealthPage(project); self.stack.addWidget(self.health_page)
+        self.lyrics_page=LyricsPage(project); self.stack.addWidget(self.lyrics_page)
         body.addWidget(self.stack,1)
         root.addLayout(body,1)
         self.player = PlayerBar(self)
@@ -775,7 +859,7 @@ class V2Workspace(QWidget):
         for i,b in enumerate(self.nav_buttons): b.setChecked(i==index)
 
     def sync(self):
-        self.dashboard.sync(); self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync(); self.engines_page.sync()
+        self.dashboard.sync(); self.sources.sync(); self.references.sync(); self.direction.sync(); self.lyrics_page.sync(); self.storage_page.sync(); self.engines_page.sync()
 
     def play_audio(self, label: str, path: str):
         self.player.set_sources({label: path}, preferred=label)
