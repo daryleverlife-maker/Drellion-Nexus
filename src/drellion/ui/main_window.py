@@ -12,9 +12,13 @@ from ..auto import run_full_auto
 from ..autosave import autosave_path, write_autosave
 from ..engine import NexusEngine
 from ..history import History
-from ..project import MediaSlot, ProjectState
+from ..project import MediaSlot, ProjectState, SourceSlot, ReferenceSlot
+from ..storage import ensure_project_folders
 from .player import PlayerBar
 from .advanced import AdvancedControlsDialog
+from .accessibility import AccessibilityDialog, apply_accessibility
+from .export_center import ExportCenterDialog
+from .project_setup import ProjectSetupDialog
 from .theme import APP_QSS
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
@@ -28,12 +32,12 @@ AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".
 
 class MainWindow(QMainWindow):
     STEP_TITLES = [
-        "1  Vocal & Lyrics",
-        "2  Reference",
-        "3  Sounds",
-        "4  Preview",
+        "1  Sources & Lyrics",
+        "2  Reference Board",
+        "3  Direction & Engine",
+        "4  Previews",
         "5  Build",
-        "6  Master",
+        "6  Master & Export",
     ]
 
     def __init__(self):
@@ -90,6 +94,12 @@ class MainWindow(QMainWindow):
         advanced = QPushButton("ADVANCED")
         advanced.clicked.connect(self.open_advanced)
         top.addWidget(advanced)
+        accessibility = QPushButton("ACCESSIBILITY")
+        accessibility.clicked.connect(self.open_accessibility)
+        top.addWidget(accessibility)
+        export = QPushButton("EXPORT")
+        export.clicked.connect(self.open_export_center)
+        top.addWidget(export)
         studio = QPushButton("CUSTOM STUDIO")
         studio.clicked.connect(self.open_studio)
         top.addWidget(studio)
@@ -191,11 +201,16 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(reset_action)
 
     def run_ai_auto(self):
-        if not self.project.vocal.path or not self.project.reference.path:
+        self.project._ensure_v2_slots()
+        has_reference = any(
+            item.enabled and (item.path or item.youtube_url)
+            for item in self.project.references
+        )
+        if not self.project.vocal.path or not has_reference:
             QMessageBox.information(
                 self,
                 "AI Auto",
-                "Load a vocal stem and a reference track first.",
+                "Add a lead vocal and at least one enabled reference first.",
             )
             return
 
@@ -272,6 +287,15 @@ class MainWindow(QMainWindow):
             if self.project.to_dict() != before:
                 self.snapshot("Changed advanced controls")
 
+    def open_accessibility(self):
+        before = self.project.to_dict()
+        dialog = AccessibilityDialog(self.project, self)
+        if dialog.exec() and self.project.to_dict() != before:
+            self.snapshot("Changed accessibility settings")
+
+    def open_export_center(self):
+        ExportCenterDialog(self, self).exec()
+
     def open_studio(self):
         self.studio_window = StudioWindow(self)
         self.studio_window.show()
@@ -298,13 +322,8 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
 
     def project_output_dir(self) -> Path:
-        if self.project_path is not None:
-            root = self.project_path.parent / (self.project_path.stem + " - Renders")
-        else:
-            safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", self.project.name or "Untitled").strip()
-            root = Path.home() / "Drellion Nexus" / "Projects" / (safe or "Untitled") / "Renders"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        folders = ensure_project_folders(self.project, self.project_path)
+        return folders.root
 
     def refresh_player_sources(self, preferred: str | None = None):
         sources = {
@@ -321,14 +340,22 @@ class MainWindow(QMainWindow):
 
     def refresh_summary(self):
         p = self.project
+        p._ensure_v2_slots()
+        sources = len([item for item in p.sources if item.path])
+        references = len([item for item in p.references if item.enabled and (item.path or item.youtube_url)])
+        provider = str(p.settings.get("generation_provider", "auto"))
+        folder = str(ensure_project_folders(p, self.project_path).root)
         self.project_summary.setText(
-            f"{p.name}\n\n"
-            f"Vocal: {'Loaded' if p.vocal.path else 'Not loaded'}\n"
-            f"Reference: {'Loaded' if p.reference.path else 'Not loaded'}\n"
-            f"Sounds: {'Configured' if p.sound_library_path else 'Default library'}\n"
+            f"{p.name}\n"
+            f"{p.artist or 'Artist not set'}\n\n"
+            f"Sources: {sources}/6\n"
+            f"References: {references}/6\n"
+            f"Engine: {provider}\n"
+            f"Sounds: {int(p.settings.get('sound_count', 0) or 0):,} indexed\n"
             f"Preview: {p.selected_preview or 'Not selected'}\n"
             f"Build: {'Ready' if p.build_path else 'Not built'}\n"
-            f"Master: {'Ready' if p.master_path else 'Not mastered'}"
+            f"Master: {'Ready' if p.master_path else 'Not mastered'}\n\n"
+            f"Project folder:\n{folder}"
         )
         if hasattr(self, "player"):
             self.refresh_player_sources()
@@ -337,22 +364,37 @@ class MainWindow(QMainWindow):
         if not getattr(self, "steps", None):
             return
 
-        vocal = self.steps[0]
-        vocal.path.blockSignals(True)
-        vocal.lyrics.blockSignals(True)
-        vocal.preserve.blockSignals(True)
-        vocal.path.setText(self.project.vocal.path)
-        vocal.lyrics.setPlainText(self.project.lyrics)
-        vocal.preserve.setCurrentText(self.project.vocal_preservation)
-        vocal.path.blockSignals(False)
-        vocal.lyrics.blockSignals(False)
-        vocal.preserve.blockSignals(False)
+        self.project._ensure_v2_slots()
+        source_step = self.steps[0]
+        if hasattr(source_step, "refresh_from_project"):
+            source_step.refresh_from_project()
 
-        reference = self.steps[1]
-        reference.path.setText(self.project.reference.path)
+        reference_step = self.steps[1]
+        if hasattr(reference_step, "refresh_from_project"):
+            reference_step.refresh_from_project()
 
-        sounds = self.steps[2]
-        sounds.path.setText(self.project.sound_library_path)
+        direction = self.steps[2]
+        direction.path.setText(self.project.sound_library_path)
+        direction.prompt.blockSignals(True)
+        direction.prompt.setPlainText(str(self.project.settings.get("production_direction_prompt", "")))
+        direction.prompt.blockSignals(False)
+        direction.reference_strength.setValue(float(self.project.settings.get("reference_audio_strength", 25.0)))
+        direction.ace_url.setText(str(self.project.settings.get("provider_ace_step_url", "http://127.0.0.1:8001")))
+        direction.diff_url.setText(str(self.project.settings.get("provider_diff_rhythm_url", "")))
+        direction.yue_url.setText(str(self.project.settings.get("provider_yue_url", "")))
+        direction.basic.setChecked(bool(self.project.settings.get("enable_basic_test_engine", False)))
+        provider_id = str(self.project.settings.get("generation_provider", "auto"))
+        for label, value in direction.PROVIDERS.items():
+            if value == provider_id:
+                direction.provider.setCurrentText(label)
+                break
+
+        preview = self.steps[3]
+        preview.preview_paths = dict(self.project.settings.get("preview_paths", {}) or {})
+        for name, path in preview.preview_paths.items():
+            if name in preview.preview_descriptions:
+                preview.preview_descriptions[name].setText(Path(path).name)
+        preview._update_sfx_status()
 
         master = self.steps[5]
         target_lufs = float(self.project.settings.get("target_lufs", -14.0))
@@ -360,11 +402,18 @@ class MainWindow(QMainWindow):
         if master.target.findText(text) >= 0:
             master.target.setCurrentText(text)
 
+        apply_accessibility(QApplication.instance(), self.project)
         self.refresh_summary()
 
     def new_project(self):
-        self.project = ProjectState()
-        self.project_path = None
+        state = ProjectState()
+        dialog = ProjectSetupDialog(state, self)
+        if dialog.exec() != dialog.Accepted:
+            return
+        self.project = dialog.state
+        folders = ensure_project_folders(self.project)
+        self.project_path = folders.project_file
+        self.project.save(self.project_path)
         self.history = History(self.project)
         self.sync_ui_from_project()
         self.goto_step(0)
@@ -430,11 +479,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Recover Autosave", str(exc))
 
     def autosave(self):
+        if not bool(self.project.settings.get("autosave_enabled", True)):
+            return
         try:
+            folders = ensure_project_folders(self.project, self.project_path)
             write_autosave(
                 self.project,
                 self.project_path,
-                Path.home() / "Drellion Nexus" / "Autosaves",
+                folders.autosaves,
             )
         except Exception:
             pass
@@ -453,15 +505,20 @@ class MainWindow(QMainWindow):
 
     def clear_current_step(self):
         if self.current_step == 0:
+            self.project.sources = []
+            self.project.active_vocal_source_id = ""
             self.project.vocal = MediaSlot()
             self.project.lyrics = ""
         elif self.current_step == 1:
+            self.project.references = []
+            self.project.active_reference_id = ""
             self.project.reference = MediaSlot()
         elif self.current_step == 2:
-            self.project.sound_library_path = ""
-            self.project.settings.pop("sound_count", None)
+            self.project.settings["production_direction_prompt"] = ""
+            self.project.settings["generation_provider"] = "auto"
         elif self.current_step == 3:
             self.project.selected_preview = ""
+            self.project.settings["preview_paths"] = {}
             self.steps[3].preview_paths.clear()
         elif self.current_step == 4:
             self.project.build_path = ""
@@ -476,11 +533,15 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Reset Project",
-            "Reset the project to defaults? Imported source files will not be deleted.",
+            "Reset project content? Source files on disk will not be deleted.",
         )
         if answer != QMessageBox.Yes:
             return
-        self.project = ProjectState()
+        storage = self.project.storage
+        accessibility = dict(self.project.settings.get("accessibility", {}) or {})
+        self.project = ProjectState(name=self.project.name, artist=self.project.artist, storage=storage)
+        if accessibility:
+            self.project.settings["accessibility"] = accessibility
         self.history = History(self.project)
         self.sync_ui_from_project()
         self.goto_step(0)
