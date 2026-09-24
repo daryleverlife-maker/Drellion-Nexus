@@ -79,6 +79,13 @@ class AceStepHttpProvider:
         if not self.base_url:
             return EngineStatus(self.name, False, "Endpoint not configured", mode="HTTP")
         try:
+            models = self.session.get(f"{self.base_url}/v1/models", timeout=min(self.timeout, 8))
+            if models.status_code < 400:
+                payload = models.json() if "json" in models.headers.get("content-type", "") else {}
+                data = payload.get("data", payload) if isinstance(payload, dict) else {}
+                default_model = str(data.get("default_model") or data.get("loaded_model") or "") if isinstance(data, dict) else ""
+                detail = f"Ready · {default_model}" if default_model else "Ready"
+                return EngineStatus(self.name, True, detail, version=default_model, mode="HTTP")
             response = self.session.get(f"{self.base_url}/v1/stats", timeout=min(self.timeout, 8))
             if response.status_code == 404:
                 response = self.session.get(f"{self.base_url}/health", timeout=min(self.timeout, 8))
@@ -90,6 +97,54 @@ class AceStepHttpProvider:
         except Exception as exc:
             return EngineStatus(self.name, False, str(exc), mode="HTTP")
 
+    def _ensure_base_model_for_complete(self, progress: Callable[[str], None] | None = None) -> str:
+        """Return a base-model name suitable for ACE-Step's Complete task.
+
+        ACE-Step documents Complete/Lego/Extract as base-model-only tasks. If
+        the API is currently running Turbo, initialize the base model on demand
+        through /v1/init rather than generating invalid candidates repeatedly.
+        """
+        wanted = "acestep-v15-base"
+        try:
+            response = self.session.get(f"{self.base_url}/v1/models", timeout=min(self.timeout, 12))
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            models = data.get("models", []) if isinstance(data, dict) else []
+            for model in models if isinstance(models, list) else []:
+                if not isinstance(model, dict):
+                    continue
+                name = str(model.get("name") or "")
+                if "base" in name.lower() and (model.get("is_loaded") is not False):
+                    return name
+        except Exception:
+            pass
+
+        if progress:
+            progress("Preparing ACE-Step base model for vocal completion")
+        try:
+            response = self.session.post(
+                f"{self.base_url}/v1/init",
+                json={"model": wanted, "slot": 1, "init_llm": False},
+                timeout=max(self.timeout, 900),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            loaded = str(data.get("loaded_model") or wanted) if isinstance(data, dict) else wanted
+            if "base" not in loaded.lower():
+                raise RuntimeError(f"ACE-Step initialized {loaded!r}, but Complete requires a base model")
+            return loaded
+        except Exception as exc:
+            raise RuntimeError(
+                "ACE-Step Complete requires the acestep-v15-base model. "
+                "Drellion could not switch the API server to the base model automatically. "
+                "Set ACESTEP_CONFIG_PATH=acestep-v15-base (or initialize that model in ACE-Step) "
+                f"and restart the API server. Details: {exc}"
+            ) from exc
+
     def generate(self, request: GenerationRequest, progress: Callable[[str], None] | None = None) -> GenerationResult:
         if not self.status().ready:
             raise RuntimeError(f"{self.name} endpoint is unavailable at {self.base_url}")
@@ -98,7 +153,7 @@ class AceStepHttpProvider:
         if progress:
             progress("Submitting to ACE-Step")
 
-        data: dict[str, str] = {
+        data: dict[str, Any] = {
             "task_type": request.task,
             "prompt": request.prompt,
             "lyrics": request.lyrics,
@@ -109,7 +164,15 @@ class AceStepHttpProvider:
         }
         if request.duration_seconds is not None:
             data["audio_duration"] = str(float(request.duration_seconds))
-        if request.task in {"text2music", "lego", "complete"}:
+        if request.task == "complete":
+            base_model = self._ensure_base_model_for_complete(progress)
+            track_classes = ["drums", "bass", "guitar", "keyboard", "synth", "strings", "percussion", "fx"]
+            data["model"] = base_model
+            data["track_classes"] = track_classes
+            data["instruction"] = "Complete the input track with " + " | ".join(x.upper() for x in track_classes) + ":"
+            data["thinking"] = "false"
+            data["inference_steps"] = "50"
+        elif request.task in {"text2music", "lego"}:
             data["thinking"] = "true"
 
         handles: list[Any] = []
