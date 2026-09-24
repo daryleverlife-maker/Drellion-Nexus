@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: v2.0.2
+      RELEASE_TAG: v2.0.3
 
     steps:
       - name: Locate latest successful 2.0 Windows build on main
@@ -44,9 +44,9 @@ jobs:
           test -f release-assets/Drellion-Nexus-2.0-Setup.exe
           test -f release-assets/Drellion-Nexus-2.0-Portable.zip
           test -f release-assets/checksums.sha256
-          mv release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0.2-Setup.exe
-          mv release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/Drellion-Nexus-2.0.2-Portable.zip
-          sed -i 's/Drellion-Nexus-2.0-Setup.exe/Drellion-Nexus-2.0.2-Setup.exe/g; s/Drellion-Nexus-2.0-Portable.zip/Drellion-Nexus-2.0.2-Portable.zip/g' release-assets/checksums.sha256
+          mv release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0.3-Setup.exe
+          mv release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/Drellion-Nexus-2.0.3-Portable.zip
+          sed -i 's/Drellion-Nexus-2.0-Setup.exe/Drellion-Nexus-2.0.3-Setup.exe/g; s/Drellion-Nexus-2.0-Portable.zip/Drellion-Nexus-2.0.3-Portable.zip/g' release-assets/checksums.sha256
 
       - name: Write release notes
         shell: bash
@@ -61,8 +61,8 @@ jobs:
           - Includes the ACE-Step 1.5 REST API compatibility fixes from 2.0.1.
 
           Windows assets:
-          - Drellion-Nexus-2.0.2-Setup.exe
-          - Drellion-Nexus-2.0.2-Portable.zip
+          - Drellion-Nexus-2.0.3-Setup.exe
+          - Drellion-Nexus-2.0.3-Portable.zip
           - checksums.sha256
           EOF
 
@@ -71,8 +71,8 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.2-Setup.exe release-assets/Drellion-Nexus-2.0.2-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
+            gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.3-Setup.exe release-assets/Drellion-Nexus-2.0.3-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
             gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0.2" --notes-file release-notes.md --latest
           else
-            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.2-Setup.exe release-assets/Drellion-Nexus-2.0.2-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.2" --notes-file release-notes.md --latest
+            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.3-Setup.exe release-assets/Drellion-Nexus-2.0.3-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.2" --notes-file release-notes.md --latest
           fi
