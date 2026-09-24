@@ -1,11 +1,11 @@
 [Setup]
-AppId={{BFA6CE74-57CA-4F8F-B4A6-D6A7B7985A5A}
-AppName=Drellion Nexus
-AppVersion=1.0.0-alpha.1
-DefaultDirName={autopf}\Drellion Nexus
-DefaultGroupName=Drellion Nexus
+AppId={{E18F9D2B-2B7B-4C9E-A227-7D3B92E2A200}
+AppName=Drellion Nexus 2 Alpha
+AppVersion=2.0.0-alpha.1
+DefaultDirName={autopf}\Drellion Nexus 2 Alpha
+DefaultGroupName=Drellion Nexus 2 Alpha
 OutputDir=..\installer-output
-OutputBaseFilename=Drellion-Nexus-Setup
+OutputBaseFilename=Drellion-Nexus-v2-Setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -15,8 +15,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Source: "..\dist\DrellionNexus\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Drellion Nexus"; Filename: "{app}\DrellionNexus.exe"
-Name: "{autodesktop}\Drellion Nexus"; Filename: "{app}\DrellionNexus.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Drellion Nexus 2 Alpha"; Filename: "{app}\DrellionNexus.exe"
+Name: "{autodesktop}\Drellion Nexus 2 Alpha"; Filename: "{app}\DrellionNexus.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
