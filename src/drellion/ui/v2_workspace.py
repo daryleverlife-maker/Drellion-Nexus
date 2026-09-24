@@ -75,6 +75,61 @@ class AccessibilityDialog(QDialog):
         super().accept()
 
 
+class DashboardPage(QWidget):
+    def __init__(self, project: ProjectState, storage: StorageSettings, parent=None):
+        super().__init__(parent); self.project=project; self.storage=storage
+        root=QVBoxLayout(self)
+        title=QLabel("PROJECT DASHBOARD"); title.setObjectName("PageTitle"); root.addWidget(title)
+        subtitle=QLabel("Start simple, then move through Sources → References → Direction → Previews → Build → Master.")
+        subtitle.setWordWrap(True); root.addWidget(subtitle)
+
+        details=QGroupBox("Project")
+        form=QFormLayout(details)
+        self.name=QLineEdit(project.name)
+        self.artist=QLineEdit(project.artist)
+        self.root=QLineEdit(project.project_root or str(Path(storage.projects) / project.name))
+        browse=QPushButton("Choose Folder"); browse.clicked.connect(self._browse)
+        row=QHBoxLayout(); row.addWidget(self.root,1); row.addWidget(browse)
+        form.addRow("Project name",self.name); form.addRow("Artist",self.artist); form.addRow("Save location",row)
+        root.addWidget(details)
+
+        workflow=QGroupBox("Workflow Status")
+        wf=QVBoxLayout(workflow)
+        self.status=QLabel(); self.status.setWordWrap(True); wf.addWidget(self.status)
+        root.addWidget(workflow)
+
+        actions=QHBoxLayout()
+        folder=QPushButton("Create/Open Project Folders"); folder.clicked.connect(self.create_folders)
+        actions.addWidget(folder); actions.addStretch(1); root.addLayout(actions)
+        root.addStretch(1)
+        self.refresh_status()
+
+    def _browse(self):
+        path=QFileDialog.getExistingDirectory(self,"Choose project folder",self.root.text())
+        if path:self.root.setText(path)
+
+    def sync(self):
+        self.project.name=self.name.text().strip() or "Untitled"
+        self.project.artist=self.artist.text().strip()
+        self.project.project_root=self.root.text().strip()
+        self.project.touch(); self.refresh_status()
+
+    def create_folders(self):
+        self.sync()
+        folders=self.project.ensure_layout(self.project.project_root)
+        self.root.setText(str(folders["root"]))
+        QMessageBox.information(self,"Project Folders",f"Project folders ready:\n{folders['root']}")
+
+    def refresh_status(self):
+        self.status.setText(
+            f"Sources: {len(self.project.sources)}   |   "
+            f"References: {len(self.project.references)} / 6   |   "
+            f"Preview: {self.project.selected_preview or 'Not selected'}   |   "
+            f"Build: {'Ready' if self.project.build_path else 'Not built'}   |   "
+            f"Master: {'Ready' if self.project.master_path else 'Not mastered'}"
+        )
+
+
 class SourceRow(QGroupBox):
     ROLES = ["Lead Vocal", "Backing Vocal", "Full Song", "Instrumental", "Drums", "Bass", "Music", "Instrument", "Other"]
 
@@ -522,9 +577,9 @@ class ExportPage(QWidget):
 
 class V2Workspace(QWidget):
     NAV = [
-        ("Sources", 0), ("References", 1), ("Direction", 2), ("Previews", 3),
-        ("Build", 4), ("Master", 5), ("Studio", 6), ("Library", 7),
-        ("Export", 8), ("Versions", 9), ("Storage", 10), ("AI Engines", 11), ("Project Health", 12),
+        ("Dashboard", 0), ("Sources", 1), ("References", 2), ("Direction", 3), ("Previews", 4),
+        ("Build", 5), ("Master", 6), ("Studio", 7), ("Library", 8),
+        ("Export", 9), ("Versions", 10), ("Storage", 11), ("AI Engines", 12), ("Project Health", 13),
     ]
 
     def __init__(self, project: ProjectState, storage: StorageSettings, accessibility: AccessibilitySettings, parent=None):
@@ -549,6 +604,7 @@ class V2Workspace(QWidget):
         body.addWidget(nav_widget)
 
         self.stack=QStackedWidget()
+        self.dashboard=DashboardPage(project,storage); self.stack.addWidget(self.dashboard)
         self.sources=SourcesPage(project); self.references=ReferencesPage(project); self.direction=DirectionPage(project)
         self.stack.addWidget(self.sources)
         self.stack.addWidget(self.references)
@@ -574,7 +630,7 @@ class V2Workspace(QWidget):
         for i,b in enumerate(self.nav_buttons): b.setChecked(i==index)
 
     def sync(self):
-        self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync(); self.engines_page.sync()
+        self.dashboard.sync(); self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync(); self.engines_page.sync()
 
     def play_audio(self, label: str, path: str):
         self.player.set_sources({label: path}, preferred=label)
