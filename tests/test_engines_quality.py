@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from drellion.audio_core import write_wav
-from drellion.providers import BasicTestEngine,EngineBroker,EngineStatus,GenerationResult
+from drellion.providers import AceStepHttpProvider,BasicTestEngine,EngineBroker,EngineStatus,GenerationRequest,GenerationResult
 from drellion.quality import QCMetrics, QCResult, evaluate_preview
 
 class ReadyProvider:
@@ -64,3 +64,40 @@ def test_preview_generation_only_promotes_qc_passed_candidates(tmp_path, monkeyp
     assert calls["n"]==4
     assert all(p.accepted for p in previews)
     assert [p.label for p in previews]==["Preview A","Preview B","Preview C"]
+
+
+class _FakeResponse:
+    def __init__(self,payload,status_code=200,content=b"",content_type="application/json"):
+        self._payload=payload; self.status_code=status_code; self.content=content; self.headers={"content-type":content_type}
+    def raise_for_status(self):
+        if self.status_code>=400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+    def json(self):return self._payload
+
+class _AceSession:
+    def __init__(self):
+        self.query_payloads=[]
+    def get(self,url,timeout=None):
+        if url.endswith("/v1/stats"):
+            return _FakeResponse({"data":{"version":"1.5"}})
+        if "/v1/audio?" in url:
+            return _FakeResponse({},content=b"RIFFfake",content_type="audio/wav")
+        raise AssertionError(url)
+    def post(self,url,**kwargs):
+        if url.endswith("/release_task"):
+            assert kwargs["data"]["audio_format"]=="wav"
+            assert "src_audio" in kwargs["files"]
+            return _FakeResponse({"data":{"task_id":"abc","status":"queued"},"code":200,"error":None})
+        if url.endswith("/query_result"):
+            self.query_payloads.append(kwargs["json"])
+            return _FakeResponse({"data":[{"task_id":"abc","status":1,"result":"[{\"file\":\"/v1/audio?path=%2Ftmp%2Fanswer.wav\"}]"}],"code":200,"error":None})
+        raise AssertionError(url)
+
+def test_acestep_current_api_contract(tmp_path):
+    src=tmp_path/"voice.wav"; src.write_bytes(b"RIFFsource")
+    provider=AceStepHttpProvider("http://127.0.0.1:8001",poll_seconds=0)
+    fake=_AceSession(); provider.session=fake
+    result=provider.generate(GenerationRequest(source_audio=str(src),prompt="test",seed=7,duration_seconds=20,output_dir=str(tmp_path/"out")))
+    assert fake.query_payloads==[{"task_id_list":["abc"]}]
+    assert Path(result.audio_path).exists()
+    assert result.metadata["task_id"]=="abc"
