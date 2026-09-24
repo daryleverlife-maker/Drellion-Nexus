@@ -48,6 +48,22 @@ class StorageSettings:
             result[key] = total
         return result
 
+
+    def save(self, path: str | Path):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path):
+        source = Path(path)
+        if not source.exists():
+            return cls.defaults()
+        try:
+            return cls(**json.loads(source.read_text(encoding="utf-8")))
+        except Exception:
+            return cls.defaults()
+
     def free_bytes(self, path: str | None = None) -> int:
         root = Path(path or self.projects)
         root.mkdir(parents=True, exist_ok=True)
