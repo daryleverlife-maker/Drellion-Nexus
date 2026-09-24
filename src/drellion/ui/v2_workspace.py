@@ -15,6 +15,7 @@ from ..storage import StorageSettings
 from ..production_v2 import generate_three_previews, build_full_song, create_broker
 from ..health import check_project
 from ..export_v2 import ExportPlan, export_project
+from ..versions import create_snapshot, list_snapshots
 from .player import PlayerBar
 from .worker import FunctionThread
 from .theme import stylesheet_for
@@ -499,7 +500,7 @@ class V2Workspace(QWidget):
         self.stack.addWidget(PlaceholderPage("STUDIO", "Timeline + browser + inspector + mixer + Ask Drellion command bar. Existing v1 Studio remains available while the v2 workspace is expanded."))
         self.stack.addWidget(PlaceholderPage("LIBRARY", "Soundbank, stems, SFX, MIDI, favourites, search, tags and user folders. Refresh detects new user-added sounds."))
         self.stack.addWidget(ExportPage(project))
-        self.stack.addWidget(PlaceholderPage("VERSIONS", "Snapshots, autosaves, generated versions, A/B comparisons and restore points.", ["Create Snapshot"]))
+        self.versions_page=VersionsPage(project); self.stack.addWidget(self.versions_page)
         self.storage_page=StoragePage(storage); self.stack.addWidget(self.storage_page)
         self.engines_page=EnginesPage(project); self.stack.addWidget(self.engines_page)
         self.health_page=HealthPage(project); self.stack.addWidget(self.health_page)
