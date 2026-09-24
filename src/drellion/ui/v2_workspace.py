@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from ..accessibility import AccessibilitySettings
 from ..project import ProjectState, SourceAsset, ReferenceAsset
 from ..storage import StorageSettings
-from ..production_v2 import generate_three_previews, build_full_song, create_broker
+from ..production_v2 import generate_three_previews, build_full_song, create_broker, run_full_auto_v2
 from ..health import check_project
 from ..export_v2 import ExportPlan, export_project
 from ..versions import create_snapshot, list_snapshots
@@ -431,7 +431,7 @@ class PreviewsPage(QWidget):
         worker.failed.connect(lambda message, w=worker: self._failed(message, w))
         worker.start()
 
-    def _complete(self, candidates, worker):
+    def show_candidates(self, candidates):
         self.candidates = candidates
         self._clear()
         accepted = 0
@@ -446,6 +446,9 @@ class PreviewsPage(QWidget):
             row.addWidget(play); row.addWidget(select)
             self.list.addWidget(box)
         self.status.setText(f"{accepted} of {len(candidates)} previews passed QC.")
+
+    def _complete(self, candidates, worker):
+        self.show_candidates(candidates)
         self.generate.setEnabled(True)
         if worker in self._workers: self._workers.remove(worker)
         worker.deleteLater()
@@ -812,12 +815,13 @@ class V2Workspace(QWidget):
 
     def __init__(self, project: ProjectState, storage: StorageSettings, accessibility: AccessibilitySettings, parent=None):
         super().__init__(parent)
-        self.project=project; self.storage=storage; self.accessibility=accessibility
+        self.project=project; self.storage=storage; self.accessibility=accessibility; self._workers=[]
         root=QVBoxLayout(self)
         header=QHBoxLayout()
         brand=QLabel("DRELLION NEXUS 2.0"); brand.setStyleSheet("font-size:20pt;font-weight:800;"); header.addWidget(brand)
         header.addStretch(1)
         self.project_label=QLabel(project.name); header.addWidget(self.project_label)
+        self.auto_button=QPushButton("AI AUTO"); self.auto_button.setObjectName("Primary"); self.auto_button.clicked.connect(self.run_auto); header.addWidget(self.auto_button)
         accessibility_button=QPushButton("♿ Accessibility"); accessibility_button.clicked.connect(self.open_accessibility); header.addWidget(accessibility_button)
         root.addLayout(header)
 
@@ -860,6 +864,40 @@ class V2Workspace(QWidget):
 
     def sync(self):
         self.dashboard.sync(); self.sources.sync(); self.references.sync(); self.direction.sync(); self.lyrics_page.sync(); self.storage_page.sync(); self.engines_page.sync()
+
+    def run_auto(self):
+        self.sync()
+        self.auto_button.setEnabled(False)
+        self.auto_button.setText("AI AUTO — RUNNING")
+        root=self.project.ensure_layout()["root"]
+        worker=FunctionThread(run_full_auto_v2,self.project,root)
+        self._workers.append(worker)
+        worker.completed.connect(lambda result,w=worker:self._auto_complete(result,w))
+        worker.failed.connect(lambda message,w=worker:self._auto_failed(message,w))
+        worker.start()
+
+    def _auto_complete(self,result,worker):
+        self.previews.show_candidates(result.previews)
+        self.build_page.status.setText(f"Build ready · {result.build.provider_id}")
+        self.build_page.play.setEnabled(True)
+        self.master_page.status.setText(f"Master ready: {Path(result.master_path).name}")
+        self.master_page.play.setEnabled(True)
+        self.player.set_sources({
+            "Selected Preview": result.selected.audio_path,
+            "Build": result.build.audio_path,
+            "Master": result.master_path,
+        },preferred="Master")
+        self.dashboard.refresh_status()
+        self.auto_button.setEnabled(True); self.auto_button.setText("AI AUTO")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+        QMessageBox.information(self,"AI Auto complete",f"Selected {result.selected.name}\nBuild and master are ready.")
+
+    def _auto_failed(self,message,worker):
+        self.auto_button.setEnabled(True); self.auto_button.setText("AI AUTO")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+        QMessageBox.critical(self,"AI Auto failed",message)
 
     def play_audio(self, label: str, path: str):
         self.player.set_sources({label: path}, preferred=label)
