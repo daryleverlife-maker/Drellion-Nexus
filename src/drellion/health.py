@@ -53,7 +53,19 @@ def check_project(project: ProjectState, broker: EngineBroker | None = None) -> 
         for stem in build.stems:
             if stem.path and not Path(stem.path).exists():
                 broken_stems.append(stem.role)
-    items.append(HealthItem("Generated stems", not broken_stems, "Missing: " + ", ".join(broken_stems) if broken_stems else "OK"))
+    selected_build = project.selected_build()
+    actual_stems = [s for s in selected_build.stems if s.path and Path(s.path).exists()] if selected_build else []
+    separate_roles = {s.role.lower() for s in actual_stems if s.role.lower() not in {"instrumental","mix","stereo mix"}}
+    stems_ok = not broken_stems and (not selected_build or len(separate_roles) >= 2)
+    if broken_stems:
+        stems_detail = "Missing: " + ", ".join(broken_stems)
+    elif selected_build and len(separate_roles) < 2:
+        stems_detail = "Only a composite instrumental is available; configure provider stem output or install Open-Unmix/Spleeter for editable separated stems."
+    elif selected_build:
+        stems_detail = f"{len(actual_stems)} generated stem(s) available"
+    else:
+        stems_detail = "No build yet"
+    items.append(HealthItem("Generated stems", stems_ok, stems_detail, severity="warning" if selected_build and len(separate_roles) < 2 else "error"))
     selected = project.selected_build()
     items.append(HealthItem("Build", bool(selected and Path(selected.mix_path).exists()), selected.label if selected else "No selected build", severity="warning"))
     master = project.selected_master()
