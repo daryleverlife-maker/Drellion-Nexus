@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: v2.0.0
+      RELEASE_TAG: v2.0.1
 
     steps:
       - name: Locate latest successful 2.0 Windows build on main
@@ -50,8 +50,7 @@ jobs:
         shell: bash
         run: |
           cat > release-notes.md <<'EOF'
-          Drellion Nexus 2.0 is the full vocal-first rebuild.
-
+          Drellion Nexus 2.0.1 is the AI-engine compatibility update for the full vocal-first rebuild.\n\n          Fixes:\n          - Updates the ACE-Step adapter for the current ACE-Step 1.5 REST API\n          - Uploads source/reference audio using the supported multipart API\n          - Requests WAV output and correctly polls wrapped task results\n          - Adds a direct Open AI Engines action when no production engine is configured\n\n
           Highlights:
           - Vocal-first, reference-guided production workflow
           - Up to six project sources and six Auto references
@@ -76,7 +75,7 @@ jobs:
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
-            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0" --notes-file release-notes.md --latest
+            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0.1" --notes-file release-notes.md --latest
           else
-            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0" --notes-file release-notes.md --latest
+            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.1" --notes-file release-notes.md --latest
           fi
