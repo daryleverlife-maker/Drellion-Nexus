@@ -21,6 +21,7 @@ from .export_center import ExportCenterDialog
 from .project_setup import ProjectSetupDialog
 from .health import HealthDialog
 from .tools_center import ToolsCenterDialog
+from .versions import VersionsDialog
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
@@ -98,6 +99,9 @@ class MainWindow(QMainWindow):
         accessibility = QPushButton("ACCESSIBILITY")
         accessibility.clicked.connect(self.open_accessibility)
         top.addWidget(accessibility)
+        versions = QPushButton("VERSIONS")
+        versions.clicked.connect(self.open_versions)
+        top.addWidget(versions)
         check = QPushButton("PROJECT CHECK")
         check.clicked.connect(self.open_health)
         top.addWidget(check)
@@ -299,6 +303,9 @@ class MainWindow(QMainWindow):
         dialog = AccessibilityDialog(self.project, self)
         if dialog.exec() and self.project.to_dict() != before:
             self.snapshot("Changed accessibility settings")
+
+    def open_versions(self):
+        VersionsDialog(self, self).exec()
 
     def open_health(self):
         HealthDialog(self, self).exec()
