@@ -1,7 +1,7 @@
 [Setup]
 AppId={{BFA6CE74-57CA-4F8F-B4A6-D6A7B7985A5A}
 AppName=Drellion Nexus
-AppVersion=2.0.2
+AppVersion=2.0.3
 DefaultDirName={autopf}\Drellion Nexus
 DefaultGroupName=Drellion Nexus
 OutputDir=..\installer-output
