@@ -14,6 +14,7 @@ from ..engine import NexusEngine
 from ..history import History
 from ..project import MediaSlot, ProjectState, SourceSlot, ReferenceSlot
 from ..storage import ensure_project_folders
+from ..preferences import load_preferences, apply_preferences_to_project
 from .player import PlayerBar
 from .advanced import AdvancedControlsDialog
 from .accessibility import AccessibilityDialog, apply_accessibility
@@ -22,6 +23,7 @@ from .project_setup import ProjectSetupDialog
 from .health import HealthDialog
 from .tools_center import ToolsCenterDialog
 from .versions import VersionsDialog
+from .settings import SettingsDialog
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
@@ -49,7 +51,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1040, 700)
         self.setAcceptDrops(True)
 
+        self.preferences = load_preferences()
         self.project = ProjectState()
+        apply_preferences_to_project(self.project, self.preferences)
         apply_accessibility(QApplication.instance(), self.project)
         self.project_path = None
         self.history = History(self.project)
@@ -63,7 +67,7 @@ class MainWindow(QMainWindow):
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave)
-        self.autosave_timer.start(15000)
+        self.autosave_timer.start(int(self.preferences.get("autosave_seconds", 120)) * 1000)
 
     def build_ui(self):
         root = QWidget()
@@ -96,6 +100,9 @@ class MainWindow(QMainWindow):
         advanced = QPushButton("ADVANCED")
         advanced.clicked.connect(self.open_advanced)
         top.addWidget(advanced)
+        settings = QPushButton("SETTINGS")
+        settings.clicked.connect(self.open_settings)
+        top.addWidget(settings)
         accessibility = QPushButton("ACCESSIBILITY")
         accessibility.clicked.connect(self.open_accessibility)
         top.addWidget(accessibility)
@@ -298,6 +305,9 @@ class MainWindow(QMainWindow):
             if self.project.to_dict() != before:
                 self.snapshot("Changed advanced controls")
 
+    def open_settings(self):
+        SettingsDialog(self, self).exec()
+
     def open_accessibility(self):
         before = self.project.to_dict()
         dialog = AccessibilityDialog(self.project, self)
@@ -426,7 +436,9 @@ class MainWindow(QMainWindow):
         self.refresh_summary()
 
     def new_project(self):
+        self.preferences = load_preferences()
         state = ProjectState()
+        apply_preferences_to_project(state, self.preferences)
         dialog = ProjectSetupDialog(state, self)
         if not dialog.exec():
             return
