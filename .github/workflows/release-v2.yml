@@ -1,0 +1,82 @@
+name: Publish Drellion Nexus 2.0 Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-v2.yml"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v2.0.0
+
+    steps:
+      - name: Locate latest successful 2.0 Windows build on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh run list --repo "${{ github.repository }}" --workflow "windows-build.yml" --branch main --status success --limit 1 --json databaseId -q '.[0].databaseId')"
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No successful main Windows build found."
+            exit 1
+          fi
+          echo "Using Windows build run $RUN_ID"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+
+      - name: Download installer, portable build, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Installer" --dir release-assets
+          gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Portable" --dir release-assets
+          gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Checksums" --dir release-assets
+          ls -lah release-assets
+          test -f release-assets/Drellion-Nexus-2.0-Setup.exe
+          test -f release-assets/Drellion-Nexus-2.0-Portable.zip
+          test -f release-assets/checksums.sha256
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<'EOF'
+          Drellion Nexus 2.0 is the full vocal-first rebuild.
+
+          Highlights:
+          - Vocal-first, reference-guided production workflow
+          - Up to six project sources and six Auto references
+          - ACE-Step / DiffRhythm engine broker with no silent procedural fallback
+          - Three genuinely separate 20–30 second preview candidates with QC gating
+          - Vocal / instrumental / together / reference auditioning
+          - Full-song Build, editable generated-stem handling, Studio, mastering, versions and export
+          - Project autosave/recovery, storage controls and Project Health
+          - Accessibility foundation with scalable UI and keyboard/screen-reader-oriented controls
+
+          Windows assets:
+          - Drellion-Nexus-2.0-Setup.exe
+          - Drellion-Nexus-2.0-Portable.zip
+          - checksums.sha256
+
+          A configured ACE-Step or DiffRhythm production engine is required for production-quality AI generation. The Basic Test Engine is demo/developer quality and is never selected silently.
+          EOF
+
+      - name: Publish Drellion Nexus 2.0 as Latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
+            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0" --notes-file release-notes.md --latest
+          else
+            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0" --notes-file release-notes.md --latest
+          fi
