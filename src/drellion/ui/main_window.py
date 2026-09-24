@@ -177,7 +177,15 @@ class MainWindow(QMainWindow):
             if on_done:on_done(result)
         def error(message):
             self.current_worker=None; self.progress.hide(); self.cancel.hide(); self.task_label.setText("Cancelled" if message=="Cancelled" else "Task failed")
-            if message!="Cancelled":QMessageBox.critical(self,"Drellion",message)
+            if message=="Cancelled":
+                return
+            if "No production AI engine is ready" in message:
+                box=QMessageBox(self); box.setIcon(QMessageBox.Critical); box.setWindowTitle("AI Engine Required")
+                box.setText(message); box.setInformativeText("Start ACE-Step or DiffRhythm, then configure it in AI Engines. For local ACE-Step, the default endpoint is http://127.0.0.1:8001.")
+                setup=box.addButton("Open AI Engines",QMessageBox.ActionRole); box.addButton("Close",QMessageBox.RejectRole); box.exec()
+                if box.clickedButton()==setup:self.navigate("AI Engines")
+            else:
+                QMessageBox.critical(self,"Drellion",message)
         worker.signals.finished.connect(finish); worker.signals.error.connect(error); self.thread_pool.start(worker)
     def cancel_task(self):
         if self.current_worker:self.current_worker.cancel(); self.cancel.setEnabled(False); self.task_label.setText("Cancellation requested…")
