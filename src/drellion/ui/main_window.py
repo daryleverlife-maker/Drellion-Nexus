@@ -19,7 +19,6 @@ from .advanced import AdvancedControlsDialog
 from .accessibility import AccessibilityDialog, apply_accessibility
 from .export_center import ExportCenterDialog
 from .project_setup import ProjectSetupDialog
-from .theme import APP_QSS
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
@@ -45,10 +44,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Drellion Nexus")
         self.resize(1400, 900)
         self.setMinimumSize(1040, 700)
-        self.setStyleSheet(APP_QSS)
         self.setAcceptDrops(True)
 
         self.project = ProjectState()
+        apply_accessibility(QApplication.instance(), self.project)
         self.project_path = None
         self.history = History(self.project)
         self.engine = NexusEngine()
@@ -408,7 +407,7 @@ class MainWindow(QMainWindow):
     def new_project(self):
         state = ProjectState()
         dialog = ProjectSetupDialog(state, self)
-        if dialog.exec() != dialog.Accepted:
+        if not dialog.exec():
             return
         self.project = dialog.state
         folders = ensure_project_folders(self.project)
@@ -462,9 +461,10 @@ class MainWindow(QMainWindow):
         self.refresh_summary()
 
     def recover_autosave(self):
+        folders = ensure_project_folders(self.project, self.project_path)
         path = autosave_path(
             self.project_path,
-            Path.home() / "Drellion Nexus" / "Autosaves",
+            folders.autosaves,
         )
         if not path.is_file():
             QMessageBox.information(self, "Recover Autosave", "No autosave exists for this project.")
@@ -559,42 +559,61 @@ class MainWindow(QMainWindow):
         if not local_paths:
             return
 
-        path = local_paths[0]
         try:
-            if path.suffix.lower() == ".drellion" and path.is_file():
-                self.load_project_path(path)
-                event.acceptProposedAction()
-                return
+            for path in local_paths:
+                if path.suffix.lower() == ".drellion" and path.is_file():
+                    self.load_project_path(path)
+                    event.acceptProposedAction()
+                    return
 
-            if path.is_dir():
-                if self.current_step == 2:
-                    self.project.sound_library_path = str(path)
-                    self.snapshot("Dropped sound library")
-                    self.sync_ui_from_project()
-                    self.steps[2].refresh()
-                event.acceptProposedAction()
-                return
+                if path.is_dir():
+                    if self.current_step == 2:
+                        self.project.sound_library_path = str(path)
+                        self.project.storage.sound_library_root = str(path)
+                        self.snapshot("Dropped sound library")
+                        self.sync_ui_from_project()
+                        self.steps[2].refresh()
+                    continue
 
-            if path.suffix.lower() in AUDIO_EXTENSIONS:
-                if self.current_step == 0:
-                    self.project.vocal = MediaSlot(str(path), path.name)
-                    preferred = "Vocal"
-                elif self.current_step == 1:
-                    self.project.reference = MediaSlot(str(path), path.name)
-                    preferred = "Reference"
-                elif not self.project.vocal.path:
-                    self.project.vocal = MediaSlot(str(path), path.name)
-                    preferred = "Vocal"
-                elif not self.project.reference.path:
-                    self.project.reference = MediaSlot(str(path), path.name)
+                if path.suffix.lower() not in AUDIO_EXTENSIONS:
+                    continue
+
+                if self.current_step == 1:
+                    step = self.steps[1]
+                    target = next(
+                        (item for item in self.project.references if not item.path and not item.youtube_url),
+                        None,
+                    )
+                    if target is None:
+                        target = self.project.references[-1]
+                    target.path = str(path)
+                    target.title = target.title or path.stem
+                    target.enabled = True
+                    if not self.project.active_reference_id:
+                        self.project.active_reference_id = target.id
+                    self.project.sync_legacy_slots()
+                    step.refresh_from_project()
                     preferred = "Reference"
                 else:
-                    self.project.finished_song = MediaSlot(str(path), path.name)
-                    preferred = "Current"
-                    self.player.load_path(str(path), "Current")
-                self.snapshot(f"Dropped {preferred.lower()} audio")
-                self.sync_ui_from_project()
-                self.refresh_player_sources(preferred if preferred != "Current" else None)
-                event.acceptProposedAction()
+                    step = self.steps[0]
+                    target = next((item for item in self.project.sources if not item.path), None)
+                    if target is None:
+                        target = self.project.sources[-1]
+                    target.path = str(path)
+                    target.label = path.name
+                    target.enabled = True
+                    if target.role == "Lead Vocal" or not self.project.vocal.path:
+                        target.role = "Lead Vocal"
+                        target.preserve = True
+                        self.project.active_vocal_source_id = target.id
+                    self.project.sync_legacy_slots()
+                    step.refresh_from_project()
+                    preferred = "Vocal" if target.role == "Lead Vocal" else None
+
+                self.snapshot("Dropped source audio")
+                self.refresh_player_sources(preferred)
+
+            event.acceptProposedAction()
         except Exception as exc:
             QMessageBox.critical(self, "Drop failed", str(exc))
+
