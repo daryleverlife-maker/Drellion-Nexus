@@ -271,7 +271,7 @@ class YueProvider(RemoteHttpProvider):
 class BasicTestProvider(GenerationProvider):
     id = 'basic_test'
     name = 'Drellion Basic Test Engine'
-    capabilities = ProviderCapabilities(complete_song=True)
+    capabilities = ProviderCapabilities(vocal_conditioning=True, reference_audio=True, lyrics=True, complete_song=True)
 
     def status(self, settings: dict[str, Any]) -> ProviderStatus:
         enabled = bool(settings.get('enable_basic_test_engine', False))
