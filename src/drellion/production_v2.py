@@ -7,7 +7,7 @@ import random
 
 from .audio.analysis import analyze_vocal_file
 from .project import ProjectState
-from .providers import AceStepHttpProvider, EngineBroker, GenerationRequest, GenerationResult, LocalCommandProvider
+from .providers import AceStepHttpProvider, DiffRhythmLocalProvider, EngineBroker, GenerationRequest
 from .quality import PreviewQualityReport, evaluate_preview, write_quality_report
 from .reference_blend import normalize_references
 from .master_v2 import blend_reference_analysis
@@ -38,13 +38,12 @@ def create_broker(project: ProjectState) -> EngineBroker:
     if ace_endpoint:
         broker.register(AceStepHttpProvider(ace_endpoint, ace_key))
 
-    ace_local = str(project.settings.get("ace_step_local_command", "")).strip()
-    if ace_local:
-        broker.register(LocalCommandProvider("ace-step-local", "ACE-Step Local", ace_local))
-
-    diff_local = str(project.settings.get("diffrhythm_local_command", "")).strip()
-    if diff_local:
-        broker.register(LocalCommandProvider("diffrhythm-local", "DiffRhythm Local", diff_local, reference=True, source=False))
+    diff_repo = str(project.settings.get("diffrhythm_repo", "")).strip()
+    if diff_repo:
+        broker.register(DiffRhythmLocalProvider(
+            diff_repo,
+            str(project.settings.get("diffrhythm_python", "")).strip(),
+        ))
     return broker
 
 
