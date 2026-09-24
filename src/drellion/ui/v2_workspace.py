@@ -23,6 +23,7 @@ from ..master_v2 import master_v2
 from ..lyrics_v2 import align_and_write, to_srt
 from ..lyrics import to_lrc
 from ..transcription import FasterWhisperTranscriber
+from ..reference_profiles import analyze_project_references
 from .studio import StudioWindow
 from .player import PlayerBar
 from .worker import FunctionThread
@@ -341,7 +342,10 @@ class ReferencesPage(QWidget):
         row = QHBoxLayout()
         add = QPushButton("+ Add Reference"); add.clicked.connect(self.add_reference)
         balance = QPushButton("Auto Balance"); balance.clicked.connect(self.auto_balance)
-        row.addWidget(add); row.addWidget(balance); row.addStretch(1); outer.addLayout(row)
+        analyze = QPushButton("Analyze References"); analyze.clicked.connect(self.analyze_references)
+        row.addWidget(add); row.addWidget(balance); row.addWidget(analyze); row.addStretch(1); outer.addLayout(row)
+        self.analysis_status = QLabel(""); self.analysis_status.setWordWrap(True); outer.addWidget(self.analysis_status)
+        self._workers = []
         outer.addStretch(1)
         self.refresh()
 
@@ -364,6 +368,31 @@ class ReferencesPage(QWidget):
         value = 1.0 / len(self.project.references)
         for ref in self.project.references: ref.weight = value
         self.refresh()
+
+    def analyze_references(self):
+        self.sync()
+        self.analysis_status.setText("Analyzing local references…")
+        worker=FunctionThread(analyze_project_references,self.project)
+        self._workers.append(worker)
+        worker.completed.connect(lambda profiles,w=worker:self._analysis_complete(profiles,w))
+        worker.failed.connect(lambda message,w=worker:self._analysis_failed(message,w))
+        worker.start()
+
+    def _analysis_complete(self,profiles,worker):
+        lines=[]
+        for profile in profiles.values():
+            lufs=profile.get("integrated_lufs")
+            lufs_text=f"{lufs:.1f} LUFS" if isinstance(lufs,(int,float)) else "LUFS n/a"
+            lines.append(f"{profile['title']}: {profile['bpm']:.1f} BPM · low end {profile['low_end_db']:.1f} dB · {lufs_text}")
+        self.analysis_status.setText("\n".join(lines) if lines else "No local reference audio to analyze. YouTube links remain playback/metadata references until authorized audio is supplied.")
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _analysis_failed(self,message,worker):
+        self.analysis_status.setText("Reference analysis failed.")
+        QMessageBox.critical(self,"Reference analysis failed",message)
+        if worker in self._workers:self._workers.remove(worker)
+        worker.deleteLater()
 
     def sync(self):
         for i in range(self.rows_box.count()):
