@@ -10,7 +10,7 @@ from .project import ProjectState
 from .providers import AceStepHttpProvider, DiffRhythmLocalProvider, EngineBroker, GenerationRequest
 from .quality import PreviewQualityReport, evaluate_preview, write_quality_report
 from .reference_blend import normalize_references
-from .master_v2 import blend_reference_analysis
+from .master_v2 import blend_reference_analysis, master_v2
 
 
 @dataclass
@@ -155,3 +155,30 @@ def build_full_song(project: ProjectState, output_dir: str | Path, seed: int | N
     report_path = out / "v2-build.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return V2BuildResult(generation.audio_path, generation.provider_id, generation.seed, str(report_path))
+
+
+@dataclass
+class V2AutoResult:
+    previews: list[PreviewCandidate]
+    selected: PreviewCandidate
+    build: V2BuildResult
+    master_path: str
+
+
+def run_full_auto_v2(project: ProjectState, project_root: str | Path) -> V2AutoResult:
+    root = Path(project_root)
+    previews = generate_three_previews(project, root / "Previews")
+    accepted = [candidate for candidate in previews if candidate.accepted]
+    if not accepted:
+        raise RuntimeError("All three generated previews failed Drellion quality control. Change the engine/direction and regenerate.")
+    selected = accepted[0]
+    project.selected_preview = selected.name
+    project.settings["selected_preview_seed"] = selected.seed
+    project.settings["selected_preview_provider"] = selected.provider_id
+    project.settings["selected_preview_path"] = selected.audio_path
+    build = build_full_song(project, root / "Generated", selected.seed)
+    project.build_path = build.audio_path
+    project.settings["build_provider"] = build.provider_id
+    project.settings["build_report"] = build.metadata_path
+    master_path = master_v2(project, root / "Masters")
+    return V2AutoResult(previews, selected, build, master_path)
