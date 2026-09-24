@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math
+import struct
 import wave
 
 import numpy as np
@@ -44,13 +45,79 @@ def _pcm_to_float(raw: bytes, sample_width: int, channels: int) -> np.ndarray:
 
 
 def read_wav(path: str | Path) -> AudioData:
+    """Read PCM or IEEE-float RIFF/WAVE audio into float32 samples.
+
+    Python's standard :mod:`wave` reader rejects WAVE_FORMAT_IEEE_FLOAT
+    (format tag 3), which is a common output format from AI audio engines.
+    Drellion parses the small RIFF header itself so generated float WAVs and
+    ordinary PCM WAVs follow the same internal audio path.
+    """
     path = Path(path)
-    with wave.open(str(path), "rb") as wf:
-        channels = wf.getnchannels()
-        sample_rate = wf.getframerate()
-        width = wf.getsampwidth()
-        frames = wf.readframes(wf.getnframes())
-    return AudioData(_pcm_to_float(frames, width, channels), sample_rate)
+    blob = path.read_bytes()
+    if len(blob) < 12 or blob[:4] != b"RIFF" or blob[8:12] != b"WAVE":
+        raise ValueError(f"Unsupported or invalid WAV file: {path}")
+
+    fmt: bytes | None = None
+    data_chunks: list[bytes] = []
+    offset = 12
+    while offset + 8 <= len(blob):
+        chunk_id = blob[offset:offset + 4]
+        chunk_size = struct.unpack_from("<I", blob, offset + 4)[0]
+        start = offset + 8
+        end = start + chunk_size
+        if end > len(blob):
+            raise ValueError(f"Truncated WAV chunk {chunk_id!r} in {path}")
+        payload = blob[start:end]
+        if chunk_id == b"fmt ":
+            fmt = payload
+        elif chunk_id == b"data":
+            data_chunks.append(payload)
+        offset = end + (chunk_size & 1)
+
+    if fmt is None or len(fmt) < 16:
+        raise ValueError(f"WAV format chunk is missing or invalid: {path}")
+    if not data_chunks:
+        raise ValueError(f"WAV data chunk is missing: {path}")
+
+    format_tag, channels, sample_rate, _byte_rate, block_align, bits_per_sample = struct.unpack_from(
+        "<HHIIHH", fmt, 0
+    )
+    # WAVE_FORMAT_EXTENSIBLE stores the real codec tag in the sub-format GUID.
+    if format_tag == 0xFFFE and len(fmt) >= 40:
+        format_tag = struct.unpack_from("<H", fmt, 24)[0]
+
+    if channels < 1 or sample_rate < 1 or bits_per_sample < 1:
+        raise ValueError(f"Invalid WAV format values in {path}")
+
+    sample_width = (bits_per_sample + 7) // 8
+    expected_align = channels * sample_width
+    if block_align and block_align < expected_align:
+        raise ValueError(f"Invalid WAV block alignment in {path}")
+
+    raw = b"".join(data_chunks)
+    frame_bytes = block_align or expected_align
+    if frame_bytes <= 0:
+        raise ValueError(f"Invalid WAV frame size in {path}")
+    raw = raw[: len(raw) - (len(raw) % frame_bytes)]
+
+    if format_tag == 1:  # WAVE_FORMAT_PCM
+        return AudioData(_pcm_to_float(raw, sample_width, channels), sample_rate)
+
+    if format_tag == 3:  # WAVE_FORMAT_IEEE_FLOAT
+        if bits_per_sample == 32:
+            samples = np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=False)
+        elif bits_per_sample == 64:
+            samples = np.frombuffer(raw, dtype="<f8").astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported IEEE-float WAV width: {bits_per_sample} bits")
+        if channels > 1:
+            samples = samples.reshape(-1, channels)
+        else:
+            samples = samples.reshape(-1, 1)
+        samples = np.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=-1.0)
+        return AudioData(np.clip(samples, -1.0, 1.0).astype(np.float32, copy=False), sample_rate)
+
+    raise ValueError(f"Unsupported WAV format tag: {format_tag}")
 
 
 def write_wav(path: str | Path, samples: np.ndarray, sample_rate: int) -> Path:
