@@ -15,6 +15,7 @@ from ..storage import StorageSettings
 from ..production_v2 import generate_three_previews, build_full_song
 from .player import PlayerBar
 from .worker import FunctionThread
+from .theme import stylesheet_for
 
 
 class AccessibilityDialog(QDialog):
@@ -63,6 +64,9 @@ class AccessibilityDialog(QDialog):
         self.settings.reduced_motion = self.motion.isChecked()
         self.settings.enhanced_screen_reader = self.reader.isChecked()
         self.settings.numeric_meters = self.numeric.isChecked()
+        window = self.window()
+        if window is not None:
+            window.setStyleSheet(stylesheet_for(self.settings))
         super().accept()
 
 
