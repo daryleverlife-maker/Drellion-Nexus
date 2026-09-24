@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -34,6 +35,7 @@ from ..timeline import (
     sync_generated_tracks,
 )
 from .player import PlayerBar
+from .waveform import WaveformWidget
 
 
 class StudioWindow(QDialog):
@@ -66,6 +68,7 @@ class StudioWindow(QDialog):
 
     def build_ui(self):
         outer = QVBoxLayout(self)
+        outer.setSpacing(10)
 
         top = QHBoxLayout()
         title = QLabel("CUSTOM STUDIO")
@@ -76,10 +79,10 @@ class StudioWindow(QDialog):
         controls = [
             ("Add Audio", self.add_audio),
             ("Sync Generated", self.sync_generated),
-            ("Duplicate Clip", self.duplicate_selected),
-            ("Split Clip", self.split_selected),
-            ("Set Fades", self.set_fades),
-            ("Remove Clip", self.remove_selected),
+            ("Duplicate", self.duplicate_selected),
+            ("Split", self.split_selected),
+            ("Fades", self.set_fades),
+            ("Remove", self.remove_selected),
             ("Render Mix", self.render_mix),
         ]
         for name, callback in controls:
@@ -89,33 +92,44 @@ class StudioWindow(QDialog):
         outer.addLayout(top)
 
         center = QHBoxLayout()
+        center.setSpacing(10)
 
-        track_panel = QFrame()
-        track_panel.setObjectName("Card")
-        track_layout = QVBoxLayout(track_panel)
-        track_layout.addWidget(QLabel("TRACKS"))
+        left = QFrame()
+        left.setObjectName("Card")
+        left.setFixedWidth(280)
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(QLabel("PROJECT BROWSER"))
+        self.asset_list = QListWidget()
+        self.asset_list.setAccessibleName("Project sources and generated assets")
+        self.asset_list.itemDoubleClicked.connect(self.asset_double_clicked)
+        left_layout.addWidget(self.asset_list, 1)
+
+        left_layout.addWidget(QLabel("TRACKS"))
         self.track_list = QListWidget()
+        self.track_list.setAccessibleName("Studio tracks")
         self.track_list.currentItemChanged.connect(self.track_changed)
-        track_layout.addWidget(self.track_list, 1)
-
-        row = QHBoxLayout()
+        left_layout.addWidget(self.track_list, 1)
+        track_buttons = QHBoxLayout()
         mute = QPushButton("Mute")
         mute.clicked.connect(self.toggle_track_mute)
         solo = QPushButton("Solo")
         solo.clicked.connect(self.toggle_track_solo)
-        row.addWidget(mute)
-        row.addWidget(solo)
-        track_layout.addLayout(row)
-        center.addWidget(track_panel, 0)
+        track_buttons.addWidget(mute)
+        track_buttons.addWidget(solo)
+        left_layout.addLayout(track_buttons)
+        center.addWidget(left)
 
         timeline_panel = QFrame()
         timeline_panel.setObjectName("Card")
         timeline_layout = QVBoxLayout(timeline_panel)
+        heading = QLabel("TIMELINE")
+        heading.setStyleSheet("font-weight:650;")
+        timeline_layout.addWidget(heading)
+        self.waveform = WaveformWidget()
+        timeline_layout.addWidget(self.waveform)
 
-        timeline_layout.addWidget(
-            QLabel("TIMELINE  •  non-destructive clips  •  values are editable")
-        )
         self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setAccessibleName("Non-destructive clip timeline")
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -125,48 +139,146 @@ class StudioWindow(QDialog):
         timeline_layout.addWidget(self.table, 1)
         center.addWidget(timeline_panel, 1)
 
-        mixer = QFrame()
-        mixer.setObjectName("Card")
-        mixer.setFixedWidth(250)
-        mixer_layout = QVBoxLayout(mixer)
-        mixer_layout.addWidget(QLabel("SELECTED TRACK"))
+        inspector = QFrame()
+        inspector.setObjectName("Card")
+        inspector.setFixedWidth(280)
+        inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.addWidget(QLabel("INSPECTOR / MIXER"))
         self.track_name = QLabel("No track selected")
         self.track_name.setWordWrap(True)
-        mixer_layout.addWidget(self.track_name)
+        inspector_layout.addWidget(self.track_name)
 
-        mixer_layout.addWidget(QLabel("Volume"))
+        inspector_layout.addWidget(QLabel("Track volume"))
         self.volume = QSlider(Qt.Horizontal)
+        self.volume.setAccessibleName("Selected track volume in decibels")
         self.volume.setRange(-240, 120)
         self.volume.setValue(0)
         self.volume.valueChanged.connect(self.track_mix_changed)
         self.volume.sliderReleased.connect(lambda: self.main.snapshot("Changed Studio track volume"))
-        mixer_layout.addWidget(self.volume)
+        inspector_layout.addWidget(self.volume)
         self.volume_value = QLabel("0.0 dB")
-        mixer_layout.addWidget(self.volume_value)
+        inspector_layout.addWidget(self.volume_value)
 
-        mixer_layout.addWidget(QLabel("Pan"))
+        inspector_layout.addWidget(QLabel("Track pan"))
         self.pan = QSlider(Qt.Horizontal)
+        self.pan.setAccessibleName("Selected track pan")
         self.pan.setRange(-100, 100)
         self.pan.setValue(0)
         self.pan.valueChanged.connect(self.track_mix_changed)
         self.pan.sliderReleased.connect(lambda: self.main.snapshot("Changed Studio track pan"))
-        mixer_layout.addWidget(self.pan)
+        inspector_layout.addWidget(self.pan)
         self.pan_value = QLabel("Center")
-        mixer_layout.addWidget(self.pan_value)
+        inspector_layout.addWidget(self.pan_value)
 
-        self.mute_box = QCheckBox("Mute")
-        self.solo_box = QCheckBox("Solo")
+        self.mute_box = QCheckBox("Mute selected track")
+        self.solo_box = QCheckBox("Solo selected track")
         self.mute_box.toggled.connect(self.track_flags_changed)
         self.solo_box.toggled.connect(self.track_flags_changed)
-        mixer_layout.addWidget(self.mute_box)
-        mixer_layout.addWidget(self.solo_box)
-        mixer_layout.addStretch()
-        center.addWidget(mixer)
+        inspector_layout.addWidget(self.mute_box)
+        inspector_layout.addWidget(self.solo_box)
 
+        inspector_layout.addWidget(QLabel("Keyboard editing"))
+        help_text = QLabel(
+            "All clip values are editable in the timeline table. Dragging is optional: "
+            "start, offset, duration, gain, pan and fades can be typed directly."
+        )
+        help_text.setWordWrap(True)
+        help_text.setObjectName("Muted")
+        inspector_layout.addWidget(help_text)
+        inspector_layout.addStretch()
+        center.addWidget(inspector)
         outer.addLayout(center, 1)
 
         self.player = PlayerBar(self)
         outer.addWidget(self.player)
+
+        command_frame = QFrame()
+        command_frame.setObjectName("Card")
+        command_row = QHBoxLayout(command_frame)
+        command_row.addWidget(QLabel("✦ Ask Drellion"))
+        self.ai_command = QLineEdit()
+        self.ai_command.setAccessibleName("Ask Drellion Studio command")
+        self.ai_command.setPlaceholderText(
+            'Try: "make the production harder", "duplicate clip", "mute track", or "make verse sparser"'
+        )
+        self.ai_command.returnPressed.connect(self.run_ai_command)
+        command_row.addWidget(self.ai_command, 1)
+        run = QPushButton("Apply")
+        run.setObjectName("Primary")
+        run.clicked.connect(self.run_ai_command)
+        command_row.addWidget(run)
+        outer.addWidget(command_frame)
+
+    def refresh_assets(self):
+        if not hasattr(self, "asset_list"):
+            return
+        self.asset_list.clear()
+        for source in self.main.project.sources:
+            if source.path and Path(source.path).is_file():
+                item = QListWidgetItem(f"{source.role} · {source.label or Path(source.path).name}")
+                item.setData(Qt.UserRole, source.path)
+                self.asset_list.addItem(item)
+        for path in self.main.project.settings.get("last_stem_outputs", []) or []:
+            if Path(path).is_file():
+                item = QListWidgetItem(f"Stem · {Path(path).name}")
+                item.setData(Qt.UserRole, path)
+                self.asset_list.addItem(item)
+        instrumental = str(self.main.project.settings.get("generated_instrumental", "") or "")
+        if instrumental and Path(instrumental).is_file():
+            item = QListWidgetItem("Generated Instrumental")
+            item.setData(Qt.UserRole, instrumental)
+            self.asset_list.addItem(item)
+
+    def asset_double_clicked(self, item):
+        path = str(item.data(Qt.UserRole) or "")
+        if not path:
+            return
+        track = self._track()
+        if track is None:
+            track = TrackState(name=Path(path).stem, role="audio")
+            self.main.project.tracks.append(track)
+            self._selected_track_id = track.id
+        clip = add_clip(track, path)
+        self._selected_clip_id = clip.id
+        self.main.snapshot("Added browser asset to Studio")
+        self.refresh()
+
+    def run_ai_command(self):
+        text = self.ai_command.text().strip()
+        if not text:
+            return
+        lowered = text.lower()
+        history = list(self.main.project.settings.get("studio_ai_commands", []) or [])
+        history.append(text)
+        self.main.project.settings["studio_ai_commands"] = history[-100:]
+
+        if "duplicate" in lowered:
+            self.duplicate_selected()
+        elif "mute" in lowered:
+            self.toggle_track_mute()
+        elif "solo" in lowered:
+            self.toggle_track_solo()
+        elif "harder" in lowered or "punch" in lowered:
+            prompt = str(self.main.project.settings.get("production_direction_prompt", "") or "")
+            addition = "stronger drum impact, more punch and stronger section lift"
+            self.main.project.settings["production_direction_prompt"] = (prompt + ", " + addition).strip(", ")
+            self.main.snapshot("Studio AI direction: harder")
+            QMessageBox.information(self, "Ask Drellion", "Production direction updated. Regenerate/repaint the selected musical section with the production engine.")
+        elif "sparser" in lowered or "less busy" in lowered:
+            prompt = str(self.main.project.settings.get("production_direction_prompt", "") or "")
+            addition = "sparser arrangement under vocals, fewer competing layers"
+            self.main.project.settings["production_direction_prompt"] = (prompt + ", " + addition).strip(", ")
+            self.main.snapshot("Studio AI direction: sparser")
+            QMessageBox.information(self, "Ask Drellion", "Production direction updated for a sparser arrangement.")
+        else:
+            self.main.project.settings["pending_studio_ai_command"] = text
+            self.main.snapshot("Queued Studio AI command")
+            QMessageBox.information(
+                self,
+                "Ask Drellion",
+                "Command saved with the project. Provider-specific section repaint routing will use this command when a generation range is selected.",
+            )
+        self.ai_command.clear()
 
     def _track(self, track_id: str | None = None) -> TrackState | None:
         wanted = track_id or self._selected_track_id
@@ -185,6 +297,7 @@ class StudioWindow(QDialog):
         return None
 
     def refresh(self):
+        self.refresh_assets()
         self._updating = True
         try:
             self.track_list.clear()
@@ -270,6 +383,11 @@ class StudioWindow(QDialog):
         if not ids:
             return
         self._selected_track_id, self._selected_clip_id = ids
+        clip = self._clip()
+        if clip is not None:
+            self.waveform.load_path(clip.path)
+        else:
+            self.waveform.clear()
         self._refresh_mixer()
 
     def clip_item_changed(self, item):
