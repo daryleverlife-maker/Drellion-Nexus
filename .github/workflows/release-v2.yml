@@ -42,12 +42,12 @@ jobs:
           gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Portable" --dir release-assets
           gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Checksums" --dir release-assets
           ls -lah release-assets
-          test -f release-assets/Drellion-Nexus-2.0.1-Setup.exe
-          test -f release-assets/Drellion-Nexus-2.0.1-Portable.zip
+          test -f release-assets/Drellion-Nexus-2.0-Setup.exe
+          test -f release-assets/Drellion-Nexus-2.0-Portable.zip
           test -f release-assets/checksums.sha256
-          mv release-assets/Drellion-Nexus-2.0.1-Setup.exe release-assets/Drellion-Nexus-2.0.1-Setup.exe
-          mv release-assets/Drellion-Nexus-2.0.1-Portable.zip release-assets/Drellion-Nexus-2.0.1-Portable.zip
-          sed -i 's/Drellion-Nexus-2.0.1-Setup.exe/Drellion-Nexus-2.0.1-Setup.exe/g; s/Drellion-Nexus-2.0.1-Portable.zip/Drellion-Nexus-2.0.1-Portable.zip/g' release-assets/checksums.sha256
+          mv release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0.1-Setup.exe
+          mv release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/Drellion-Nexus-2.0.1-Portable.zip
+          sed -i 's/Drellion-Nexus-2.0-Setup.exe/Drellion-Nexus-2.0.1-Setup.exe/g; s/Drellion-Nexus-2.0-Portable.zip/Drellion-Nexus-2.0.1-Portable.zip/g' release-assets/checksums.sha256
 
       - name: Write release notes
         shell: bash
