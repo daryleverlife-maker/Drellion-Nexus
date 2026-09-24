@@ -18,7 +18,7 @@ from ..vocal_analysis import analyze_vocal
 from .common import AudioTransport,Page
 
 AUDIO_FILTER="Audio (*.wav *.mp3 *.flac *.m4a *.aac *.ogg);;All files (*)"
-SOURCE_ROLES=["Lead Vocal","Backing Vocal","Drums","Bass","Music","Instrument","Other","Full Song"]
+SOURCE_ROLES=["Lead Vocal","Backing Vocal","Drums","Bass","Music","Instrument","Instrumental","Other","Full Song"]
 
 
 class ProjectPage(Page):
@@ -171,23 +171,82 @@ class DirectionPage(Page):
 class PreviewsPage(Page):
     title="Previews"
     def __init__(self,host):
-        super().__init__(host); root=QVBoxLayout(self); title=QLabel("Three real previews — quality checked before Build"); title.setStyleSheet("font-size: 20px; font-weight: 700;"); bar=QHBoxLayout(); generate=QPushButton("Generate 3 Previews"); generate.setProperty("primary",True); regenerate=QPushButton("Regenerate 3"); generate.clicked.connect(self.generate); regenerate.clicked.connect(self.generate); bar.addWidget(generate); bar.addWidget(regenerate); bar.addStretch(); self.cards=QGridLayout(); self.player=AudioTransport("Preview"); root.addWidget(title); root.addLayout(bar); root.addLayout(self.cards); root.addWidget(self.player); root.addStretch()
+        super().__init__(host)
+        root=QVBoxLayout(self)
+        title=QLabel("Three real previews — quality checked before Build")
+        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        region=QGroupBox("Preview Region")
+        rf=QFormLayout(region)
+        self.auto_region=QCheckBox("Automatically choose a vocal-heavy 20–30 second region")
+        self.auto_region.setChecked(True)
+        self.start=QDoubleSpinBox(); self.start.setRange(0,36000); self.start.setSuffix(" s"); self.start.setDecimals(1)
+        self.length=QDoubleSpinBox(); self.length.setRange(18,30); self.length.setValue(25); self.length.setSuffix(" s"); self.length.setDecimals(1)
+        rf.addRow(self.auto_region); rf.addRow("Start",self.start); rf.addRow("Length",self.length)
+        self.auto_region.toggled.connect(self._region_mode)
+        bar=QHBoxLayout()
+        generate=QPushButton("Generate 3 Previews"); generate.setProperty("primary",True)
+        regenerate=QPushButton("Regenerate 3")
+        generate.clicked.connect(self.generate); regenerate.clicked.connect(self.generate)
+        bar.addWidget(generate); bar.addWidget(regenerate); bar.addStretch()
+        self.cards=QGridLayout()
+        self.player=AudioTransport("Preview")
+        root.addWidget(title); root.addWidget(region); root.addLayout(bar); root.addLayout(self.cards); root.addWidget(self.player); root.addStretch()
+        self._region_mode(True)
+
+    def _region_mode(self,automatic):
+        self.start.setEnabled(not automatic); self.length.setEnabled(not automatic)
+
     def _clear(self):
         while self.cards.count():
             item=self.cards.takeAt(0); w=item.widget()
             if w:w.deleteLater()
+
     def generate(self):
         if not self.project:return
-        broker=create_broker(self.project.engine_preferences); self.host.run_task(lambda progress=None:generate_three_previews(self.project,broker,progress=progress),"Generating three previews",self._done)
-    def _done(self,_result):self.host.project_changed(); self.refresh()
+        broker=create_broker(self.project.engine_preferences)
+        region=None if self.auto_region.isChecked() else (self.start.value(),self.length.value())
+        self.host.run_task(lambda progress=None:generate_three_previews(self.project,broker,progress=progress,region=region),"Generating three QC-passed previews",self._done)
+
+    def _done(self,_result):
+        self.host.project_changed(); self.refresh()
+
+    def _reference_path(self):
+        if not self.project:return ""
+        refs=[r for r in self.project.references if r.enabled and r.path and Path(r.path).exists()]
+        refs.sort(key=lambda r:r.weight,reverse=True)
+        return refs[0].path if refs else ""
+
+    def play_reference(self):
+        path=self._reference_path()
+        if path:self.player.set_path(path,True)
+        else:QMessageBox.information(self,"A/B Reference","Add a local reference audio file to use A/B Reference playback.")
+
     def refresh(self):
         self._clear()
         if not self.project:return
+        reference_available=bool(self._reference_path())
+        if not self.project.previews:
+            note=QLabel("No QC-passed previews yet. Generate three previews before Build.")
+            note.setWordWrap(True); self.cards.addWidget(note,0,0,1,3); return
         for i,p in enumerate(self.project.previews):
-            box=QGroupBox(p.label); v=QVBoxLayout(box); state="PASSED QC" if p.accepted else "REJECTED BY QC"; label=QLabel(f"{state}\nEngine: {p.engine} {p.engine_version}\nSeed: {p.seed}"); label.setWordWrap(True); v.addWidget(label); checks=p.qc.get("checks",{}) if p.qc else {}; qc=QLabel("\n".join(("✓ " if ok else "✗ ")+key.replace("_"," ") for key,ok in checks.items())); v.addWidget(qc); buttons=QHBoxLayout(); together=QPushButton("Play Together"); inst=QPushButton("Instrumental"); vocal=QPushButton("Vocal Only"); select=QPushButton("Select"); together.clicked.connect(lambda _=False,x=p:self.player.set_path(x.audio_path,True)); inst.clicked.connect(lambda _=False,x=p:self.player.set_path(x.instrumental_path,True)); vocal.clicked.connect(lambda _=False,x=p:self.player.set_path(x.vocal_path,True)); select.setEnabled(p.accepted); select.clicked.connect(lambda _=False,x=p:self.select(x))
-            for b in (together,inst,vocal,select):buttons.addWidget(b)
+            box=QGroupBox(p.label); v=QVBoxLayout(box)
+            label=QLabel(f"PASSED QC\nEngine: {p.engine} {p.engine_version}\nSeed: {p.seed}\nRegion: {p.region_start:.1f}s + {p.region_duration:.1f}s")
+            label.setWordWrap(True); v.addWidget(label)
+            checks=p.qc.get("checks",{}) if p.qc else {}
+            qc=QLabel("\n".join(("✓ " if ok else "✗ ")+key.replace("_"," ") for key,ok in checks.items()))
+            v.addWidget(qc)
+            buttons=QHBoxLayout()
+            together=QPushButton("Play Together"); inst=QPushButton("Instrumental"); vocal=QPushButton("Vocal Only"); reference=QPushButton("A/B Reference"); select=QPushButton("Select")
+            together.clicked.connect(lambda _=False,x=p:self.player.set_path(x.audio_path,True))
+            inst.clicked.connect(lambda _=False,x=p:self.player.set_path(x.instrumental_path,True))
+            vocal.clicked.connect(lambda _=False,x=p:self.player.set_path(x.vocal_path,True))
+            reference.setEnabled(reference_available); reference.clicked.connect(self.play_reference)
+            select.clicked.connect(lambda _=False,x=p:self.select(x))
+            for b in (together,inst,vocal,reference,select):buttons.addWidget(b)
             v.addLayout(buttons); self.cards.addWidget(box,0,i)
-    def select(self,preview):self.project.selected_preview_id=preview.id; self.project.save(); self.host.project_changed(); QMessageBox.information(self,"Preview",f"Selected {preview.label}.")
+
+    def select(self,preview):
+        self.project.selected_preview_id=preview.id; self.project.save(); self.host.project_changed(); QMessageBox.information(self,"Preview",f"Selected {preview.label}.")
 
 
 class BuildPage(Page):
