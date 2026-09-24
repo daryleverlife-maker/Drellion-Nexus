@@ -10,6 +10,7 @@ from .project import ProjectState
 from .providers import AceStepHttpProvider, EngineBroker, GenerationRequest, GenerationResult, LocalCommandProvider
 from .quality import PreviewQualityReport, evaluate_preview, write_quality_report
 from .reference_blend import normalize_references
+from .master_v2 import blend_reference_analysis
 
 
 @dataclass
@@ -93,6 +94,7 @@ def generate_three_previews(project: ProjectState, output_dir: str | Path) -> li
     preview_seconds = min(30.0, max(18.0, vocal.duration))
     base_seed = int(project.settings.get("preview_seed", random.randint(1, 2_000_000_000)))
     candidates = []
+    reference_analysis = blend_reference_analysis(project)
 
     for index, label in enumerate(("Preview A", "Preview B", "Preview C")):
         seed = base_seed + index * 1009
@@ -106,7 +108,7 @@ def generate_three_previews(project: ProjectState, output_dir: str | Path) -> li
             output_dir=str(out / label.replace(" ", "-").lower()),
             source_roles={s.path: s.role for s in project.sources if s.path},
         ))
-        quality = evaluate_preview(generation.audio_path)
+        quality = evaluate_preview(generation.audio_path, reference_analysis)
         write_quality_report(quality, out / f"quality-{index+1}.json")
         candidates.append(PreviewCandidate(label, generation.audio_path, generation.provider_id, seed, quality, quality.passed))
 
