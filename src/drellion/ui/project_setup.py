@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..project import ProjectState
@@ -30,6 +30,19 @@ class ProjectSetupDialog(QDialog):
         self.artist.setPlaceholderText('Artist name (optional)')
         form.addRow('Project name', self.name)
         form.addRow('Artist', self.artist)
+
+        self.template = QComboBox()
+        self.template.addItems([
+            'Vocal / Acapella',
+            'Vocal + Stems',
+            'Full Song Rework',
+            'Multiple Songs / Mashup',
+            'Instrumental',
+            'Lyrics Only',
+            'Empty Studio',
+        ])
+        self.template.setCurrentText(str(self.state.settings.get('project_template', 'Vocal / Acapella')))
+        form.addRow('Start from', self.template)
 
         self.project_root = QLineEdit(self.state.storage.project_root or str(Path.home() / 'Drellion Nexus' / 'Projects'))
         self.export_root = QLineEdit(self.state.storage.export_root)
@@ -64,7 +77,7 @@ class ProjectSetupDialog(QDialog):
         outer.addLayout(row)
 
     def _path_row(self, field):
-        wrapper = QDialog()
+        wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         browse = QPushButton('Browse…')
@@ -92,6 +105,7 @@ class ProjectSetupDialog(QDialog):
         self.state.storage.cache_root = self.cache_root.text().strip()
         if self.sound_root.text().strip():
             self.state.sound_library_path = self.sound_root.text().strip()
+        self.state.settings['project_template'] = self.template.currentText()
         self.state.settings['consolidate_imports'] = self.consolidate.isChecked()
         self.state.settings['autosave_enabled'] = self.recovery.isChecked()
         folders = ensure_project_folders(self.state)
