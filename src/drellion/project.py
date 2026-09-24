@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 import json
+import shutil
 import time
 import uuid
 
@@ -142,6 +143,61 @@ class ProjectState:
         self.references.append(reference)
         self.touch()
         return reference
+
+    def remove_source(self, source_id: str) -> bool:
+        before = len(self.sources)
+        self.sources = [item for item in self.sources if item.id != source_id]
+        changed = len(self.sources) != before
+        if changed:
+            self.touch()
+        return changed
+
+    def remove_reference(self, reference_id: str) -> bool:
+        before = len(self.references)
+        self.references = [item for item in self.references if item.id != reference_id]
+        changed = len(self.references) != before
+        if changed:
+            self.touch()
+        return changed
+
+    def consolidate_imported_media(self) -> dict[str, int]:
+        """Copy external source/reference files into the project without deleting originals."""
+        folders = self.ensure_layout()
+        counts = {"sources": 0, "references": 0}
+
+        def copy_into(raw_path: str, destination: Path, asset_id: str) -> str:
+            if not raw_path:
+                return raw_path
+            source = Path(raw_path)
+            if not source.is_file():
+                return raw_path
+            try:
+                if destination.resolve() in source.resolve().parents:
+                    return str(source)
+            except OSError:
+                pass
+            destination.mkdir(parents=True, exist_ok=True)
+            safe_name = source.name
+            target = destination / f"{asset_id[:8]}-{safe_name}"
+            if not target.exists() or target.stat().st_size != source.stat().st_size:
+                shutil.copy2(source, target)
+            return str(target)
+
+        for item in self.sources:
+            new_path = copy_into(item.path, folders["sources"], item.id)
+            if new_path != item.path:
+                item.path = new_path
+                counts["sources"] += 1
+
+        for item in self.references:
+            new_path = copy_into(item.path, folders["references"], item.id)
+            if new_path != item.path:
+                item.path = new_path
+                counts["references"] += 1
+
+        if counts["sources"] or counts["references"]:
+            self.touch()
+        return counts
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
