@@ -262,7 +262,7 @@ class BuildPage(Page):
         if not self.project:return
         b=self.project.selected_build()
         if not b:self.status.setText("Select a QC-passed preview first, then build."); return
-        self.status.setText(f"{b.label}\nEngine: {b.engine} {b.engine_version}\nGenerated stems: {', '.join(s.role for s in b.stems)}\nCreated: {b.created_at}"); self.player.set_path(b.mix_path)
+        roles=[s.role for s in b.stems]\n        separated=[r for r in roles if r.lower() not in {"instrumental","mix","stereo mix"}]\n        stem_note=", ".join(roles) if len(separated)>=2 else (", ".join(roles)+"\n⚠ Editable separated stems require provider stem output or an installed Open-Unmix/Spleeter separator.")\n        self.status.setText(f"{b.label}\\nEngine: {b.engine} {b.engine_version}\\nGenerated stems: {stem_note}\\nCreated: {b.created_at}"); self.player.set_path(b.mix_path)
 
 
 class MasterPage(Page):
