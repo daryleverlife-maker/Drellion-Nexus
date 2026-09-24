@@ -16,6 +16,7 @@ from .audio.vocal import process_vocal
 from .lyrics import align_lyrics, to_lrc
 from .library import SoundLibrary, SoundPalette
 from .sfx import SfxSuggestion, suggest_sfx
+from .tools import separate_open_unmix, tool_statuses
 
 
 @dataclass
@@ -24,6 +25,7 @@ class BuildResult:
     instrumental_path: str = ""
     report_path: str = ""
     lyric_path: str = ""
+    stem_paths: list[str] | None = None
 
 
 class NexusEngine:
@@ -517,6 +519,22 @@ class NexusEngine:
             lrc.write_text(to_lrc(lyric_cues), encoding='utf-8')
             lyric_path = str(lrc)
 
+        stem_paths: list[str] = []
+        stem_warning = ""
+        if bool(state.settings.get('auto_split_generated', True)):
+            open_unmix = next((item for item in tool_statuses() if item.id == 'open_unmix'), None)
+            if open_unmix and open_unmix.available:
+                try:
+                    stem_paths = [
+                        str(path)
+                        for path in separate_open_unmix(build_path, out / 'Stems')
+                    ]
+                    state.settings['generated_stems'] = stem_paths
+                except Exception as exc:
+                    stem_warning = str(exc)
+            else:
+                stem_warning = 'Open-Unmix is not installed; generated build remains a stereo file.'
+
         report_path = out / 'report.json'
         report_path.write_text(json.dumps({
             'engine': provider.name,
@@ -527,6 +545,8 @@ class NexusEngine:
             'prompt': prompt,
             'source_vocal_preserved_as_condition': True,
             'exact_reference_audio_copied': False,
+            'stem_paths': stem_paths,
+            'stem_warning': stem_warning,
             'outputs': {'build': str(build_path)},
         }, indent=2), encoding='utf-8')
 
@@ -535,6 +555,7 @@ class NexusEngine:
             instrumental_path='',
             report_path=str(report_path),
             lyric_path=lyric_path,
+            stem_paths=stem_paths,
         )
 
     def master(self, state: ProjectState, output_dir: str | Path) -> str:
