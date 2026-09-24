@@ -1,7 +1,8 @@
 from pathlib import Path
 import shutil
+import struct
 import numpy as np
-from drellion.audio_core import write_wav
+from drellion.audio_core import read_wav,write_wav
 from drellion.export_v2 import ExportOptions,export_project
 from drellion.master_v2 import master_wav
 from drellion.production_v2 import direction_prompt,representative_preview_region
@@ -15,3 +16,18 @@ def test_direction_and_preview_region(tmp_path):
 
 def test_master_and_export(tmp_path):
     source=tmp_path/"mix.wav"; make_wav(source); project=ProjectState.create(tmp_path/"p","Song","Artist"); generated=project.folder("Generated")/"mix.wav"; shutil.copy2(source,generated); build=BuildRecord(label="Build 01",mix_path=str(generated),instrumental_path=str(generated),stems=[GeneratedStem(role="Instrumental",path=str(generated))]); project.builds.append(build); project.selected_build_id=build.id; master_path,engine,measurements=master_wav(generated,project.folder("Masters")/"master.wav"); assert master_path.exists(); master=MasterRecord(source_build_id=build.id,path=str(master_path),engine=engine,measurements=measurements.to_dict()); project.masters.append(master); project.selected_master_id=master.id; result=export_project(project,project.folder("Exports"),ExportOptions(mp3=False,lyrics_lrc=False,lyrics_srt=False)); assert any(p.suffix==".wav" for p in result.files); assert any("metadata" in p.name for p in result.files)
+
+
+def test_read_ieee_float_wav_format_3(tmp_path):
+    sr=48000; channels=2
+    samples=np.array([[0.25,-0.25],[0.5,-0.5],[0.0,0.75]],dtype="<f4")
+    raw=samples.tobytes()
+    fmt=struct.pack("<HHIIHH",3,channels,sr,sr*channels*4,channels*4,32)
+    riff_size=4+(8+len(fmt))+(8+len(raw))
+    payload=b"RIFF"+struct.pack("<I",riff_size)+b"WAVE"+b"fmt "+struct.pack("<I",len(fmt))+fmt+b"data"+struct.pack("<I",len(raw))+raw
+    path=tmp_path/"float32.wav"; path.write_bytes(payload)
+    audio=read_wav(path)
+    assert audio.sample_rate==sr
+    assert audio.channels==channels
+    assert audio.samples.shape==(3,2)
+    assert np.allclose(audio.samples,samples,atol=1e-6)
