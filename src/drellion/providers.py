@@ -106,14 +106,16 @@ class AceStepProvider(RemoteHttpProvider):
     )
 
     @staticmethod
-    def _multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
+    def _multipart(fields: dict[str, str | list[str]], files: dict[str, Path]) -> tuple[bytes, str]:
         boundary = '----DrellionNexus' + uuid.uuid4().hex
         body = bytearray()
         for name, value in fields.items():
-            body.extend(f'--{boundary}\r\n'.encode())
-            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
-            body.extend(str(value).encode('utf-8'))
-            body.extend(b'\r\n')
+            values = value if isinstance(value, list) else [value]
+            for scalar in values:
+                body.extend(f'--{boundary}\r\n'.encode())
+                body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+                body.extend(str(scalar).encode('utf-8'))
+                body.extend(b'\r\n')
         for name, path in files.items():
             mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
             body.extend(f'--{boundary}\r\n'.encode())
@@ -325,18 +327,33 @@ class AceStepProvider(RemoteHttpProvider):
             if ref.is_file():
                 files['reference_audio'] = ref
 
+        default_tracks = [
+            'drums', 'bass', 'guitar', 'keyboard',
+            'strings', 'synth', 'percussion', 'fx',
+        ]
+        requested_tracks = settings.get('ace_complete_tracks', default_tracks) or default_tracks
+        if isinstance(requested_tracks, str):
+            requested_tracks = [part.strip() for part in requested_tracks.split(',') if part.strip()]
+
         fields = {
             'task_type': 'complete',
+            # Complete is a Base-model source-conditioned task.
+            'model': str(settings.get('provider_ace_step_model', 'acestep-v15-base') or 'acestep-v15-base'),
             # Both names are accepted by different ACE-Step HTTP generations.
             'prompt': prompt,
             'caption': prompt,
             'lyrics': lyrics or '',
             'audio_duration': f'{max(4.0, float(duration)):.3f}',
             'batch_size': str(max(1, min(8, int(batch_size)))),
-            'thinking': 'true',
-            'use_format': 'true',
+            # Keep the real source audio authoritative. Some upstream versions
+            # can let LM-generated codes pre-empt src_audio when thinking=true.
+            'thinking': 'false',
+            'use_format': 'false',
+            'track_classes': [str(track) for track in requested_tracks],
+            'instruction': 'Complete the input vocal with ' + ', '.join(str(track).upper() for track in requested_tracks) + ':',
             'audio_cover_strength': f'{max(0.0, min(1.0, float(cover_strength))):.3f}',
             'audio_format': 'flac',
+            'inference_steps': str(int(settings.get('provider_ace_step_complete_steps', 50) or 50)),
         }
         if bpm and bpm > 0:
             fields['bpm'] = str(round(float(bpm)))
