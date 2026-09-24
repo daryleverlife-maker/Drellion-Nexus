@@ -52,13 +52,14 @@ jobs:
         shell: bash
         run: |
           cat > release-notes.md <<'EOF'
-          Drellion Nexus 2.0.2 fixes ACE-Step generated WAV compatibility.
+          Drellion Nexus 2.0.3 fixes ACE-Step generated WAV compatibility.
 
           Fixes:
-          - Reads IEEE-float WAV (format tag 3) returned by ACE-Step.
-          - Keeps normal PCM WAV support.
-          - Adds regression coverage for float32 stereo WAV decoding.
-          - Includes the ACE-Step 1.5 REST API compatibility fixes from 2.0.1.
+          - Forces ACE-Step Complete tasks onto the required acestep-v15-base model.
+          - Automatically initializes the base model through the ACE-Step API when the server is running Turbo.
+          - Sends explicit accompaniment track classes for drums, bass, guitar, keyboard, synth, strings, percussion and FX.
+          - Treats bass/drum-density and vocal-balance checks as musical warnings rather than hard failures.
+          - Retains the IEEE-float WAV and ACE-Step REST compatibility fixes from 2.0.2.
 
           Windows assets:
           - Drellion-Nexus-2.0.3-Setup.exe
@@ -66,13 +67,13 @@ jobs:
           - checksums.sha256
           EOF
 
-      - name: Publish Drellion Nexus 2.0.2 as Latest
+      - name: Publish Drellion Nexus 2.0.3 as Latest
         shell: bash
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.3-Setup.exe release-assets/Drellion-Nexus-2.0.3-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
-            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0.2" --notes-file release-notes.md --latest
+            gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0.3" --notes-file release-notes.md --latest
           else
-            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.3-Setup.exe release-assets/Drellion-Nexus-2.0.3-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.2" --notes-file release-notes.md --latest
+            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.3-Setup.exe release-assets/Drellion-Nexus-2.0.3-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.3" --notes-file release-notes.md --latest
           fi
