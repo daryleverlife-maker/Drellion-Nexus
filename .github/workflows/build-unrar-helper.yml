@@ -1,0 +1,36 @@
+name: Build UnRAR Helper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-unrar-helper.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download official UnRAR source
+        run: |
+          curl -fL --retry 3 -o unrarsrc.tar.gz https://www.rarlab.com/rar/unrarsrc-7.2.7.tar.gz
+          tar -xzf unrarsrc.tar.gz
+
+      - name: Build UnRAR
+        run: |
+          cd unrar
+          make -f makefile
+          ./unrar | head -5
+          cp unrar ../unrar-linux-x64
+
+      - name: Upload helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: unrar-linux-x64
+          path: unrar-linux-x64
+          if-no-files-found: error
+          retention-days: 1
