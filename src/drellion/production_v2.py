@@ -90,27 +90,61 @@ def _copy_generated(result:GenerationResult,destination:Path)->Path:
 
 
 def generate_three_previews(project:ProjectState,broker:EngineBroker,preferred_engine:str|None=None,progress:ProgressFn|None=None,region:tuple[float,float]|None=None)->list[PreviewRecord]:
-    project.ensure_layout(); source=lead_vocal(project)
-    if source is None or not Path(source.path).exists(): raise RuntimeError("A valid source vocal is required")
-    start,duration=region or representative_preview_region(project); prompt=direction_prompt(project); refs=reference_paths(project); created=[]
-    for i in range(3):
-        if progress: progress(f"Generating preview {i+1} of 3")
-        seed=_seed_for(project,i); preview_vocal=_make_preview_vocal(project,start,duration,i)
-        request=GenerationRequest(source_audio=preview_vocal,reference_audio=refs,prompt=prompt,lyrics=project.lyrics_text,seed=seed,duration_seconds=duration,start_seconds=start,task="complete",reference_strength=float(project.direction.get("reference_strength",0.55)),output_dir=str(project.folder("Previews")/f"engine-{i+1}"))
+    project.ensure_layout()
+    source=lead_vocal(project)
+    if source is None or not Path(source.path).exists():
+        raise RuntimeError("A valid source vocal is required")
+    start,duration=region or representative_preview_region(project)
+    duration=max(18.0,min(30.0,float(duration)))
+    prompt=direction_prompt(project)
+    refs=reference_paths(project)
+    accepted:list[PreviewRecord]=[]
+    max_attempts=9
+    for attempt in range(max_attempts):
+        slot=len(accepted)+1
+        if progress:
+            progress(f"Generating QC candidate {attempt+1} of {max_attempts} — {len(accepted)} of 3 passed")
+        seed=_seed_for(project,attempt)
+        preview_vocal=_make_preview_vocal(project,start,duration,attempt)
+        request=GenerationRequest(
+            source_audio=preview_vocal,reference_audio=refs,prompt=prompt,lyrics=project.lyrics_text,
+            seed=seed,duration_seconds=duration,start_seconds=start,task="complete",
+            reference_strength=float(project.direction.get("reference_strength",0.55)),
+            output_dir=str(project.folder("Previews")/f"engine-attempt-{attempt+1}")
+        )
         result=broker.generate(request,preferred=preferred_engine,progress=progress)
-        instrumental=_copy_generated(result,project.folder("Previews")/f"candidate-{i+1:02d}-instrumental.wav")
+        raw=_copy_generated(result,project.folder("Previews")/f"attempt-{attempt+1:02d}-instrumental.wav")
         vocal_for_qc=preview_vocal if Path(preview_vocal).suffix.lower()==".wav" else None
-        qc=evaluate_preview(instrumental,vocal_for_qc); mix_path=instrumental
+        qc=evaluate_preview(raw,vocal_for_qc)
+        (project.folder("Previews")/f"attempt-{attempt+1:02d}-qc.json").write_text(json.dumps(qc.to_dict(),indent=2),encoding="utf-8")
+        if not qc.accepted:
+            continue
+        instrumental=project.folder("Previews")/f"candidate-{slot:02d}-instrumental.wav"
+        if raw.resolve()!=instrumental.resolve():
+            shutil.copy2(raw,instrumental)
+        mix_path=instrumental
         if vocal_for_qc:
             try:
                 music=read_wav(instrumental); vocal_audio=read_wav(vocal_for_qc)
                 mixed=mix_tracks([(music,-3.0),(vocal_audio,0.0)],headroom_db=1.0)
-                mix_path=project.folder("Previews")/f"candidate-{i+1:02d}-together.wav"; write_wav(mix_path,mixed.samples,mixed.sample_rate)
-            except Exception: mix_path=instrumental
-        record=PreviewRecord(label=f"Preview {chr(65+i)}",audio_path=str(mix_path),instrumental_path=str(instrumental),vocal_path=str(preview_vocal),engine=result.engine,engine_version=result.engine_version,seed=seed,prompt=prompt,region_start=start,region_duration=duration,accepted=qc.accepted,qc=qc.to_dict())
-        created.append(record)
-        (project.folder("Previews")/f"candidate-{i+1:02d}-qc.json").write_text(json.dumps(record.qc,indent=2),encoding="utf-8")
-    project.previews=created; project.selected_preview_id=next((p.id for p in created if p.accepted),""); project.save(); return created
+                mix_path=project.folder("Previews")/f"candidate-{slot:02d}-together.wav"
+                write_wav(mix_path,mixed.samples,mixed.sample_rate)
+            except Exception:
+                mix_path=instrumental
+        record=PreviewRecord(
+            label=f"Preview {chr(64+slot)}",audio_path=str(mix_path),instrumental_path=str(instrumental),
+            vocal_path=str(preview_vocal),engine=result.engine,engine_version=result.engine_version,seed=seed,
+            prompt=prompt,region_start=start,region_duration=duration,accepted=True,qc=qc.to_dict()
+        )
+        accepted.append(record)
+        if len(accepted)==3:
+            break
+    project.previews=accepted
+    project.selected_preview_id=""
+    project.save()
+    if len(accepted)<3:
+        raise RuntimeError(f"Only {len(accepted)} of 3 previews passed Drellion QC after {max_attempts} attempts. No full Build is allowed; adjust the engine, reference, or direction and regenerate.")
+    return accepted
 
 
 def build_from_preview(project:ProjectState,broker:EngineBroker,preview_id:str|None=None,preferred_engine:str|None=None,progress:ProgressFn|None=None)->BuildRecord:
