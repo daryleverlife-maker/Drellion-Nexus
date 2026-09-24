@@ -13,6 +13,7 @@ from .providers import AceStepHttpProvider, DiffRhythmLocalProvider, EngineBroke
 from .quality import PreviewQualityReport, evaluate_preview, write_quality_report
 from .reference_blend import normalize_references
 from .master_v2 import blend_reference_analysis, master_v2
+from .stems import available_stem_engines
 
 
 @dataclass
@@ -176,12 +177,25 @@ def build_full_song(project: ProjectState, output_dir: str | Path, seed: int | N
         output_dir=str(out),
         source_roles={s.path: s.role for s in project.sources if s.path},
     ))
+    generated_stems = {}
+    if bool(project.settings.get("auto_separate_generated", True)):
+        selected = next(((engine, status) for engine, status in available_stem_engines() if status.available), None)
+        if selected is not None:
+            stem_engine, stem_status = selected
+            try:
+                generated_stems = stem_engine.separate(generation.audio_path, out / "Stems")
+                project.settings["generated_stems"] = generated_stems
+                project.settings["generated_stem_engine"] = stem_status.name
+            except Exception as exc:
+                project.settings["generated_stem_error"] = str(exc)
+
     report = {
         "provider": generation.provider_id,
         "seed": generation.seed,
         "audio_path": generation.audio_path,
         "references": references,
         "source_count": len(project.sources),
+        "generated_stems": generated_stems,
         "policy": "Source-conditioned original generation; references guide production direction only.",
         "provider_metadata": generation.metadata,
     }
