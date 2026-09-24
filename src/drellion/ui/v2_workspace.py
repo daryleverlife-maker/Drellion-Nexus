@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
@@ -12,6 +12,9 @@ from PySide6.QtWidgets import (
 from ..accessibility import AccessibilitySettings
 from ..project import ProjectState, SourceAsset, ReferenceAsset
 from ..storage import StorageSettings
+from ..production_v2 import generate_three_previews, build_full_song
+from .player import PlayerBar
+from .worker import FunctionThread
 
 
 class AccessibilityDialog(QDialog):
@@ -236,6 +239,127 @@ class DirectionPage(QWidget):
         self.project.vocal_preservation = self.vocal.currentText()
 
 
+class PreviewsPage(QWidget):
+    play_requested = Signal(str, str)
+
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent)
+        self.project = project
+        self.candidates = []
+        self._workers = []
+        root = QVBoxLayout(self)
+        title = QLabel("4  PREVIEWS"); title.setObjectName("PageTitle"); root.addWidget(title)
+        info = QLabel("Generate three real 20–30 second arrangements. Every preview must pass Drellion QC before it is marked ready.")
+        info.setWordWrap(True); root.addWidget(info)
+        self.status = QLabel("No previews generated."); root.addWidget(self.status)
+        self.list = QVBoxLayout(); root.addLayout(self.list)
+        self.generate = QPushButton("Generate 3 Previews"); self.generate.setObjectName("Primary"); self.generate.clicked.connect(self.generate_previews)
+        root.addWidget(self.generate, 0, Qt.AlignLeft)
+        root.addStretch(1)
+
+    def _clear(self):
+        while self.list.count():
+            item = self.list.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+    def generate_previews(self):
+        self.generate.setEnabled(False)
+        self.status.setText("Generating previews with the selected engine…")
+        out = self.project.ensure_layout()["previews"]
+        worker = FunctionThread(generate_three_previews, self.project, out)
+        self._workers.append(worker)
+        worker.completed.connect(lambda result, w=worker: self._complete(result, w))
+        worker.failed.connect(lambda message, w=worker: self._failed(message, w))
+        worker.start()
+
+    def _complete(self, candidates, worker):
+        self.candidates = candidates
+        self._clear()
+        accepted = 0
+        for candidate in candidates:
+            box = QGroupBox(candidate.name)
+            row = QHBoxLayout(box)
+            state = "PASS" if candidate.accepted else "REJECTED"
+            if candidate.accepted: accepted += 1
+            row.addWidget(QLabel(f"{state} · {candidate.provider_id} · seed {candidate.seed}"))
+            play = QPushButton("Play Together"); play.clicked.connect(lambda checked=False, c=candidate: self.play_requested.emit(c.name, c.audio_path))
+            select = QPushButton("Select"); select.setEnabled(candidate.accepted); select.clicked.connect(lambda checked=False, c=candidate: self.select_candidate(c))
+            row.addWidget(play); row.addWidget(select)
+            self.list.addWidget(box)
+        self.status.setText(f"{accepted} of {len(candidates)} previews passed QC.")
+        self.generate.setEnabled(True)
+        if worker in self._workers: self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _failed(self, message, worker):
+        self.status.setText("Generation failed.")
+        self.generate.setEnabled(True)
+        QMessageBox.critical(self, "Preview generation failed", message)
+        if worker in self._workers: self._workers.remove(worker)
+        worker.deleteLater()
+
+    def select_candidate(self, candidate):
+        self.project.selected_preview = candidate.name
+        self.project.settings["selected_preview_seed"] = candidate.seed
+        self.project.settings["selected_preview_provider"] = candidate.provider_id
+        self.project.settings["selected_preview_path"] = candidate.audio_path
+        self.project.touch()
+        self.status.setText(f"Selected {candidate.name}.")
+
+
+class BuildPage(QWidget):
+    play_requested = Signal(str, str)
+
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent)
+        self.project = project
+        self._workers = []
+        root = QVBoxLayout(self)
+        title = QLabel("5  BUILD"); title.setObjectName("PageTitle"); root.addWidget(title)
+        text = QLabel("Build the chosen arrangement using the selected real generation provider. Drellion will not silently switch to the Basic Test Engine.")
+        text.setWordWrap(True); root.addWidget(text)
+        self.status = QLabel("Select a passing preview first."); root.addWidget(self.status)
+        self.button = QPushButton("Build Full Song"); self.button.setObjectName("Primary"); self.button.clicked.connect(self.build)
+        root.addWidget(self.button, 0, Qt.AlignLeft)
+        self.play = QPushButton("Play Build"); self.play.setEnabled(False); self.play.clicked.connect(self.play_build); root.addWidget(self.play, 0, Qt.AlignLeft)
+        root.addStretch(1)
+
+    def build(self):
+        seed = self.project.settings.get("selected_preview_seed")
+        if not self.project.selected_preview or seed is None:
+            QMessageBox.information(self, "Build", "Select a preview that passed QC first.")
+            return
+        self.button.setEnabled(False)
+        self.status.setText("Building the full arrangement…")
+        out = self.project.ensure_layout()["generated"]
+        worker = FunctionThread(build_full_song, self.project, out, seed)
+        self._workers.append(worker)
+        worker.completed.connect(lambda result, w=worker: self._complete(result, w))
+        worker.failed.connect(lambda message, w=worker: self._failed(message, w))
+        worker.start()
+
+    def _complete(self, result, worker):
+        self.project.build_path = result.audio_path
+        self.project.settings["build_provider"] = result.provider_id
+        self.project.settings["build_report"] = result.metadata_path
+        self.project.touch()
+        self.status.setText(f"Build ready · {result.provider_id}")
+        self.button.setEnabled(True); self.play.setEnabled(True)
+        if worker in self._workers: self._workers.remove(worker)
+        worker.deleteLater()
+
+    def _failed(self, message, worker):
+        self.status.setText("Build failed.")
+        self.button.setEnabled(True)
+        QMessageBox.critical(self, "Build failed", message)
+        if worker in self._workers: self._workers.remove(worker)
+        worker.deleteLater()
+
+    def play_build(self):
+        if self.project.build_path:
+            self.play_requested.emit("Build", self.project.build_path)
+
+
 class PlaceholderPage(QWidget):
     def __init__(self, title: str, body: str, buttons: list[str] | None = None, parent=None):
         super().__init__(parent)
@@ -328,8 +452,8 @@ class V2Workspace(QWidget):
         self.stack.addWidget(self.sources)
         self.stack.addWidget(self.references)
         self.stack.addWidget(self.direction)
-        self.stack.addWidget(PlaceholderPage("4  PREVIEWS", "Generate three real 20–30 second arrangements, run automatic quality checks, then audition Vocal / Instrumental / Together / Reference A-B.", ["Generate 3 Previews", "Regenerate Failed"]))
-        self.stack.addWidget(PlaceholderPage("5  BUILD", "Build the chosen arrangement into editable stems. The selected provider must be ready; Drellion will not silently switch to the Basic Test Engine.", ["Build Full Song"]))
+        self.previews = PreviewsPage(project); self.previews.play_requested.connect(self.play_audio); self.stack.addWidget(self.previews)
+        self.build_page = BuildPage(project); self.build_page.play_requested.connect(self.play_audio); self.stack.addWidget(self.build_page)
         self.stack.addWidget(PlaceholderPage("6  MASTER", "Reference-aware mastering with loudness, true peak, tonal balance, width and volume-matched A/B.", ["Master Track"]))
         self.stack.addWidget(PlaceholderPage("STUDIO", "Timeline + browser + inspector + mixer + Ask Drellion command bar. Existing v1 Studio remains available while the v2 workspace is expanded."))
         self.stack.addWidget(PlaceholderPage("LIBRARY", "Soundbank, stems, SFX, MIDI, favourites, search, tags and user folders. Refresh detects new user-added sounds."))
@@ -338,6 +462,8 @@ class V2Workspace(QWidget):
         self.storage_page=StoragePage(storage); self.stack.addWidget(self.storage_page)
         body.addWidget(self.stack,1)
         root.addLayout(body,1)
+        self.player = PlayerBar(self)
+        root.addWidget(self.player)
         self.goto(0)
 
     def goto(self,index:int):
@@ -346,6 +472,9 @@ class V2Workspace(QWidget):
 
     def sync(self):
         self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync()
+
+    def play_audio(self, label: str, path: str):
+        self.player.set_sources({label: path}, preferred=label)
 
     def open_accessibility(self):
         dialog=AccessibilityDialog(self.accessibility,self)
