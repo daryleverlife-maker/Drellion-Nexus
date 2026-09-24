@@ -15,6 +15,7 @@ from ..history import History
 from ..project import MediaSlot, ProjectState, SourceSlot, ReferenceSlot
 from ..storage import ensure_project_folders
 from ..preferences import load_preferences, apply_preferences_to_project
+from ..recent import register_recent
 from .player import PlayerBar
 from .advanced import AdvancedControlsDialog
 from .accessibility import AccessibilityDialog, apply_accessibility
@@ -24,6 +25,7 @@ from .health import HealthDialog
 from .tools_center import ToolsCenterDialog
 from .versions import VersionsDialog
 from .settings import SettingsDialog
+from .home import HomeDialog
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
 )
@@ -83,6 +85,7 @@ class MainWindow(QMainWindow):
         top.addStretch()
 
         for text, callback in [
+            ("Home", self.open_home),
             ("New", self.new_project),
             ("Open", self.open_project),
             ("Save", self.save_project),
@@ -305,6 +308,9 @@ class MainWindow(QMainWindow):
             if self.project.to_dict() != before:
                 self.snapshot("Changed advanced controls")
 
+    def open_home(self):
+        HomeDialog(self, self).exec()
+
     def open_settings(self):
         SettingsDialog(self, self).exec()
 
@@ -446,6 +452,12 @@ class MainWindow(QMainWindow):
         folders = ensure_project_folders(self.project)
         self.project_path = folders.project_file
         self.project.save(self.project_path)
+        register_recent(
+            self.project_path,
+            name=self.project.name,
+            artist=self.project.artist,
+            updated_at=self.project.updated_at,
+        )
         self.history = History(self.project)
         self.sync_ui_from_project()
         self.goto_step(0)
@@ -453,6 +465,12 @@ class MainWindow(QMainWindow):
     def load_project_path(self, path: str | Path):
         self.project = ProjectState.load(path)
         self.project_path = Path(path)
+        register_recent(
+            self.project_path,
+            name=self.project.name,
+            artist=self.project.artist,
+            updated_at=self.project.updated_at,
+        )
         self.history = History(self.project)
         self.sync_ui_from_project()
 
@@ -471,6 +489,12 @@ class MainWindow(QMainWindow):
         if self.project_path is None:
             return self.save_project_as()
         self.project_path = self.project.save(self.project_path)
+        register_recent(
+            self.project_path,
+            name=self.project.name,
+            artist=self.project.artist,
+            updated_at=self.project.updated_at,
+        )
         self.refresh_summary()
 
     def save_project_as(self):
@@ -480,6 +504,12 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.project_path = self.project.save(path)
+        register_recent(
+            self.project_path,
+            name=self.project.name,
+            artist=self.project.artist,
+            updated_at=self.project.updated_at,
+        )
         self.refresh_summary()
 
     def save_copy(self):
