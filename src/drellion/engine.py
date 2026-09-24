@@ -10,6 +10,8 @@ from .audio.mix_analysis import analyze_mix_file
 from .audio.contracts import ArrangementPreview, ReferenceAnalysis, VocalAnalysis
 from .audio.render import master_audio, mix_sfx_events, mix_vocal_and_instrumental
 from .audio.synthesis import synthesize_instrumental
+from .providers import ProviderBroker, AceStepProvider, BasicTestProvider
+from .qc import inspect_preview
 from .audio.vocal import process_vocal
 from .lyrics import align_lyrics, to_lrc
 from .library import SoundLibrary, SoundPalette
@@ -30,6 +32,7 @@ class NexusEngine:
     def __init__(self):
         self._vocal_cache: dict[tuple, VocalAnalysis] = {}
         self._mix_cache: dict[tuple, ReferenceAnalysis] = {}
+        self.providers = ProviderBroker()
 
     @staticmethod
     def _file_key(path: str) -> tuple:
@@ -103,6 +106,95 @@ class NexusEngine:
             return 2
         return 0
 
+    def _enabled_references(self, state: ProjectState):
+        state._ensure_v2_slots()
+        return [item for item in state.references if item.enabled and (item.path or item.youtube_url)]
+
+    def _reference_for_audio(self, state: ProjectState):
+        references = [item for item in self._enabled_references(state) if item.path and Path(item.path).is_file()]
+        if not references:
+            return None
+        return max(references, key=lambda item: float(item.influence))
+
+    def _blended_reference(self, state: ProjectState) -> ReferenceAnalysis:
+        references = [item for item in self._enabled_references(state) if item.path and Path(item.path).is_file()]
+        if not references:
+            if state.reference.path:
+                return self.analyze_reference(state)
+            return ReferenceAnalysis(bpm=90.0, energy_curve=[0.72] * 12)
+
+        analyses: list[tuple[float, ReferenceAnalysis]] = []
+        for item in references:
+            analysis = self.analyze_mix(item.path)
+            item.analysis = asdict(analysis)
+            analyses.append((max(0.01, float(item.influence)), analysis))
+
+        total = sum(weight for weight, _ in analyses) or 1.0
+        bpm_values = [(weight, a.bpm) for weight, a in analyses if a.bpm > 0]
+        bpm_total = sum(weight for weight, _ in bpm_values) or 1.0
+        bpm = sum(weight * value for weight, value in bpm_values) / bpm_total if bpm_values else 90.0
+
+        curve_len = max((len(a.energy_curve) for _, a in analyses), default=12)
+        curve = []
+        for index in range(curve_len):
+            value = 0.0
+            weight_sum = 0.0
+            for weight, analysis in analyses:
+                if analysis.energy_curve:
+                    src_index = min(len(analysis.energy_curve) - 1, int(index * len(analysis.energy_curve) / curve_len))
+                    value += weight * analysis.energy_curve[src_index]
+                    weight_sum += weight
+            curve.append(value / weight_sum if weight_sum else 0.72)
+
+        tone_keys = set().union(*(a.tone.keys() for _, a in analyses))
+        stereo_keys = set().union(*(a.stereo.keys() for _, a in analyses))
+        dynamics_keys = set().union(*(a.dynamics.keys() for _, a in analyses))
+        groove_keys = set().union(*(a.groove.keys() for _, a in analyses))
+
+        def blend_dict(keys, attr):
+            out = {}
+            for key in keys:
+                pairs = [(w, getattr(a, attr).get(key)) for w, a in analyses if getattr(a, attr).get(key) is not None]
+                denom = sum(w for w, _ in pairs)
+                if denom:
+                    out[key] = sum(w * float(v) for w, v in pairs) / denom
+            return out
+
+        return ReferenceAnalysis(
+            bpm=bpm,
+            duration=max((a.duration for _, a in analyses), default=0.0),
+            energy_curve=curve,
+            groove=blend_dict(groove_keys, 'groove'),
+            tone=blend_dict(tone_keys, 'tone'),
+            stereo=blend_dict(stereo_keys, 'stereo'),
+            dynamics=blend_dict(dynamics_keys, 'dynamics'),
+        )
+
+    def _production_prompt(self, state: ProjectState, reference: ReferenceAnalysis) -> str:
+        custom = str(state.settings.get('production_direction_prompt', '') or '').strip()
+        descriptors = ['original vocal-first production', 'arranged around the supplied vocal performance']
+        if reference.bpm:
+            descriptors.append(f'around {reference.bpm:.0f} BPM')
+        bass_db = reference.tone.get('bass_60_120')
+        sub_db = reference.tone.get('sub_20_60')
+        if bass_db is not None or sub_db is not None:
+            descriptors.append('solid controlled low-end and real drum impact')
+        if reference.dynamics.get('range_db', 0.0) > 8.0:
+            descriptors.append('clear verse-to-chorus dynamic contrast')
+        descriptors.extend([
+            'distinct verse chorus bridge transitions',
+            'punchy kick and snare',
+            'supportive bass',
+            'harmonic layers that leave space for the vocal',
+            'no copied melody hooks samples or exact reference drum patterns',
+        ])
+        if custom:
+            descriptors.append(custom)
+        return ', '.join(descriptors)
+
+    def provider_statuses(self, state: ProjectState):
+        return self.providers.statuses(state.settings)
+
     def smart_sfx(self, state: ProjectState) -> list[SfxSuggestion]:
         if not state.sound_library_path:
             return []
@@ -112,7 +204,7 @@ class NexusEngine:
         library.scan()
         return suggest_sfx(cues, library)
 
-    def generate_previews(
+    def _generate_previews_basic(
         self, state: ProjectState, output_dir: str | Path
     ) -> list[ArrangementPreview]:
         vocal = self.analyze_vocal(state)
@@ -183,7 +275,7 @@ class NexusEngine:
         )
         return previews
 
-    def build(self, state: ProjectState, output_dir: str | Path) -> BuildResult:
+    def _build_basic(self, state: ProjectState, output_dir: str | Path) -> BuildResult:
         vocal = self.analyze_vocal(state)
         reference = self.analyze_reference(state)
         out = Path(output_dir)
@@ -278,6 +370,162 @@ class NexusEngine:
         return BuildResult(
             build_path=str(build_path),
             instrumental_path=str(instrumental),
+            report_path=str(report_path),
+            lyric_path=lyric_path,
+        )
+
+    def generate_previews(
+        self, state: ProjectState, output_dir: str | Path
+    ) -> list[ArrangementPreview]:
+        state._ensure_v2_slots()
+        provider = self.providers.choose(state.settings, require_vocal=True)
+        if isinstance(provider, BasicTestProvider):
+            return self._generate_previews_basic(state, output_dir)
+        if not isinstance(provider, AceStepProvider):
+            raise RuntimeError(
+                f'{provider.name} is configured but v2 vocal-complete preview routing is not enabled for it yet.'
+            )
+
+        vocal = self.analyze_vocal(state)
+        reference = self._blended_reference(state)
+        audio_reference = self._reference_for_audio(state)
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        preview_duration = min(30.0, max(12.0, vocal.duration))
+        prompt = self._production_prompt(state, reference)
+        cover_strength = float(state.settings.get('reference_audio_strength', 25.0)) / 100.0
+
+        candidates: list[Path] = []
+        attempts = 0
+        while len(candidates) < 3 and attempts < 2:
+            attempts += 1
+            generated = provider.generate_complete(
+                state.settings,
+                source_audio=state.vocal.path,
+                reference_audio=audio_reference.path if audio_reference else None,
+                lyrics=state.lyrics,
+                prompt=prompt,
+                output_dir=out / f'provider-pass-{attempts}',
+                duration=preview_duration,
+                batch_size=3 - len(candidates),
+                bpm=reference.bpm,
+                cover_strength=cover_strength,
+            )
+            for candidate in generated:
+                report = inspect_preview(candidate)
+                if report.passed:
+                    candidates.append(candidate)
+                else:
+                    reject = out / 'rejected-qc.jsonl'
+                    with reject.open('a', encoding='utf-8') as handle:
+                        handle.write(json.dumps({
+                            'path': str(candidate),
+                            'score': report.score,
+                            'failures': [asdict(item) for item in report.failures],
+                        }) + '\n')
+                if len(candidates) >= 3:
+                    break
+
+        if len(candidates) < 3:
+            raise RuntimeError(
+                'Generation completed, but fewer than three previews passed Drellion Beat QC. '
+                'No weak preview was shown. Try another provider, direction or reference blend.'
+            )
+
+        previews: list[ArrangementPreview] = []
+        for index, candidate in enumerate(candidates[:3]):
+            name = ('Preview A', 'Preview B', 'Preview C')[index]
+            report = inspect_preview(candidate)
+            target = out / f'preview-{index + 1}{candidate.suffix}'
+            if candidate.resolve() != target.resolve():
+                target.write_bytes(candidate.read_bytes())
+            previews.append(ArrangementPreview(
+                name=name,
+                audio_path=str(target),
+                description=f'{provider.name} complete arrangement · Beat QC {report.score:.0f}/100 · {reference.bpm:.1f} BPM blend',
+                similarity={
+                    'reference_bpm': reference.bpm,
+                    'generated_bpm': self.analyze_mix(target).bpm,
+                    'qc_score': report.score,
+                    'exact_reference_hits_reused': 0.0,
+                },
+            ))
+
+        state.settings['preview_provider'] = provider.id
+        state.settings['preview_paths'] = {item.name: item.audio_path for item in previews}
+        state.settings['preview_reference_prompt'] = prompt
+        (out / 'previews.json').write_text(
+            json.dumps([asdict(item) for item in previews], indent=2),
+            encoding='utf-8',
+        )
+        return previews
+
+    def build(self, state: ProjectState, output_dir: str | Path) -> BuildResult:
+        state._ensure_v2_slots()
+        provider = self.providers.choose(state.settings, require_vocal=True)
+        if isinstance(provider, BasicTestProvider):
+            return self._build_basic(state, output_dir)
+        if not isinstance(provider, AceStepProvider):
+            raise RuntimeError(
+                f'{provider.name} is configured but v2 vocal-complete Build routing is not enabled for it yet.'
+            )
+
+        vocal = self.analyze_vocal(state)
+        reference = self._blended_reference(state)
+        audio_reference = self._reference_for_audio(state)
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        prompt = self._production_prompt(state, reference)
+        cover_strength = float(state.settings.get('reference_audio_strength', 25.0)) / 100.0
+
+        generated = provider.generate_complete(
+            state.settings,
+            source_audio=state.vocal.path,
+            reference_audio=audio_reference.path if audio_reference else None,
+            lyrics=state.lyrics,
+            prompt=prompt,
+            output_dir=out / 'provider',
+            duration=max(12.0, vocal.duration),
+            batch_size=1,
+            bpm=reference.bpm,
+            cover_strength=cover_strength,
+        )
+        build_source = generated[0]
+        qc = inspect_preview(build_source)
+        if not qc.passed:
+            raise RuntimeError(
+                'Full build failed Drellion Beat QC: '
+                + '; '.join(item.name for item in qc.failures)
+            )
+
+        build_path = out / ('build' + build_source.suffix)
+        if build_source.resolve() != build_path.resolve():
+            build_path.write_bytes(build_source.read_bytes())
+
+        lyric_cues = align_lyrics(state.lyrics, vocal.phrase_regions, vocal.duration)
+        lyric_path = ''
+        if lyric_cues:
+            lrc = out / 'lyrics.lrc'
+            lrc.write_text(to_lrc(lyric_cues), encoding='utf-8')
+            lyric_path = str(lrc)
+
+        report_path = out / 'report.json'
+        report_path.write_text(json.dumps({
+            'engine': provider.name,
+            'provider_id': provider.id,
+            'beat_qc_score': qc.score,
+            'reference_blend': asdict(reference),
+            'reference_count': len(self._enabled_references(state)),
+            'prompt': prompt,
+            'source_vocal_preserved_as_condition': True,
+            'exact_reference_audio_copied': False,
+            'outputs': {'build': str(build_path)},
+        }, indent=2), encoding='utf-8')
+
+        return BuildResult(
+            build_path=str(build_path),
+            instrumental_path='',
             report_path=str(report_path),
             lyric_path=lyric_path,
         )
