@@ -17,6 +17,7 @@ from ..metadata import TrackMetadata, embed_metadata
 from ..project import ReferenceSlot, SourceSlot
 from ..youtube import youtube_oembed
 from .export_center import ExportCenterDialog
+from .reference_roles import ReferenceRolesDialog
 
 
 AUDIO_FILTER = "Audio (*.wav *.flac *.mp3 *.m4a *.aac *.ogg *.opus *.aiff *.aif *.wma)"
@@ -254,6 +255,9 @@ class ReferenceRow(QWidget):
         self.enabled = QCheckBox("Use")
         self.enabled.toggled.connect(self.changed)
         top.addWidget(self.enabled)
+        roles = QPushButton("Roles…")
+        roles.clicked.connect(self.edit_roles)
+        top.addWidget(roles)
         outer.addLayout(top)
 
         local = QHBoxLayout()
@@ -320,6 +324,12 @@ class ReferenceRow(QWidget):
         self.step.window.project.sync_legacy_slots()
         self.step.window.project.touch()
         self.step.window.refresh_summary()
+
+    def edit_roles(self):
+        slot = self.slot()
+        if ReferenceRolesDialog(slot, self).exec():
+            self.changed()
+            self.step.window.snapshot(f"Changed Reference {self.index + 1} role influence")
 
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose Reference Audio", "", AUDIO_FILTER)
