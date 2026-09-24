@@ -86,16 +86,51 @@ def remove_clip(track: TrackState, clip_id: str) -> None:
 
 
 def sync_generated_tracks(project: ProjectState) -> None:
+    project._ensure_v2_slots()
     if project.vocal.path:
         vocal = ensure_track(project, "Vocal", "vocal")
         if not any(clip.path == project.vocal.path for clip in vocal.clips):
             add_clip(vocal, project.vocal.path, label=project.vocal.label or "Vocal")
+
+    # Add every user source as an editable track while avoiding duplicates.
+    for source in project.sources:
+        if not source.path or not Path(source.path).is_file():
+            continue
+        role = source.role.lower().replace(" ", "_")
+        track = ensure_track(project, source.role or "Source", "source_" + role)
+        if not any(clip.path == source.path for clip in track.clips):
+            add_clip(track, source.path, label=source.label or Path(source.path).stem)
+
+    stem_paths = list(project.settings.get("generated_stems", []) or [])
+    stem_roles = {
+        "drums": ("Generated Drums", "generated_drums"),
+        "bass": ("Generated Bass", "generated_bass"),
+        "vocals": ("Generated Vocal Stem", "generated_vocals"),
+        "vocal": ("Generated Vocal Stem", "generated_vocals"),
+        "other": ("Generated Music", "generated_other"),
+    }
+    for path in stem_paths:
+        source = Path(path)
+        if not source.is_file():
+            continue
+        lowered = source.stem.lower()
+        role_key = next((key for key in stem_roles if key in lowered), "other")
+        name, role = stem_roles[role_key]
+        track = ensure_track(project, name, role)
+        if not any(clip.path == str(source) for clip in track.clips):
+            add_clip(track, source, label=source.stem)
 
     instrumental_path = str(project.settings.get("generated_instrumental", "") or "")
     if instrumental_path:
         instrumental = ensure_track(project, "Generated Instrumental", "instrumental")
         if not any(clip.path == instrumental_path for clip in instrumental.clips):
             add_clip(instrumental, instrumental_path, label="Generated Instrumental")
+
+    if project.build_path and Path(project.build_path).is_file() and not stem_paths and not instrumental_path:
+        generated = ensure_track(project, "AI Build", "generated_build")
+        if not any(clip.path == project.build_path for clip in generated.clips):
+            add_clip(generated, project.build_path, label="AI Build")
+
 
 
 def _audible_tracks(project: ProjectState) -> list[TrackState]:
