@@ -14,6 +14,7 @@ from ..engine import NexusEngine
 from ..history import History
 from ..project import MediaSlot, ProjectState
 from .player import PlayerBar
+from .advanced import AdvancedControlsDialog
 from .theme import APP_QSS
 from .steps import (
     VocalLyricsStep, ReferenceStep, SoundsStep, PreviewStep, BuildStep, MasterStep,
@@ -86,6 +87,9 @@ class MainWindow(QMainWindow):
         self.auto_button.setObjectName("Primary")
         self.auto_button.clicked.connect(self.run_ai_auto)
         top.addWidget(self.auto_button)
+        advanced = QPushButton("ADVANCED")
+        advanced.clicked.connect(self.open_advanced)
+        top.addWidget(advanced)
         studio = QPushButton("CUSTOM STUDIO")
         studio.clicked.connect(self.open_studio)
         top.addWidget(studio)
@@ -260,6 +264,13 @@ class MainWindow(QMainWindow):
         worker.completed.connect(complete)
         worker.failed.connect(failed)
         worker.start()
+
+    def open_advanced(self):
+        before = self.project.to_dict()
+        dialog = AdvancedControlsDialog(self.project, self)
+        if dialog.exec():
+            if self.project.to_dict() != before:
+                self.snapshot("Changed advanced controls")
 
     def open_studio(self):
         self.studio_window = StudioWindow(self)
