@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Protocol
 import json
 import shutil
+import subprocess
+import sys
 import time
 import urllib.parse
 
@@ -188,6 +190,80 @@ class AceStepHttpProvider:
                         fh.write(chunk)
 
         return GenerationResult(self.id, str(target), {}, request.seed, {"task_id": task_id, "raw": result_payload})
+
+
+class DiffRhythmLocalProvider:
+    id = "diffrhythm-local"
+    name = "DiffRhythm 2 Local"
+
+    def __init__(self, repo_path: str, python_executable: str = ""):
+        self.repo_path = Path(repo_path)
+        self.python_executable = python_executable or sys.executable
+
+    def status(self) -> ProviderStatus:
+        script = self.repo_path / "inference.py"
+        available = self.repo_path.is_dir() and script.is_file() and Path(self.python_executable).exists()
+        return ProviderStatus(
+            self.id, self.name,
+            ProviderState.READY if available else ProviderState.MISSING,
+            str(self.repo_path) if available else "DiffRhythm2 repo/inference.py not configured",
+            True, False, False, False,
+        )
+
+    @staticmethod
+    def _lrc(lyrics: str, duration: float) -> str:
+        lines = [line.strip() for line in lyrics.splitlines() if line.strip()]
+        if not lines:
+            lines = ["[Instrumental]"]
+        step = max(1.0, duration / max(1, len(lines)))
+        output = []
+        for i, line in enumerate(lines):
+            seconds = i * step
+            minute = int(seconds // 60)
+            second = seconds - minute * 60
+            output.append(f"[{minute:02d}:{second:05.2f}] {line}")
+        return "\n".join(output) + "\n"
+
+    def generate(self, request: GenerationRequest) -> GenerationResult:
+        status = self.status()
+        if status.state != ProviderState.READY:
+            raise RuntimeError(status.detail)
+        out = Path(request.output_dir or ".")
+        out.mkdir(parents=True, exist_ok=True)
+
+        lyrics_path = out / "diffrhythm-lyrics.lrc"
+        lyrics_path.write_text(self._lrc(request.lyrics, request.duration), encoding="utf-8")
+        style_prompt = request.reference_paths[0] if request.reference_paths else request.prompt
+        song_name = f"drellion-diffrhythm-{request.seed or 0}"
+        input_path = out / "diffrhythm-input.jsonl"
+        input_path.write_text(json.dumps({
+            "song_name": song_name,
+            "lyrics": str(lyrics_path.resolve()),
+            "style_prompt": str(Path(style_prompt).resolve()) if Path(style_prompt).is_file() else style_prompt,
+        }) + "\n", encoding="utf-8")
+
+        command = [
+            self.python_executable,
+            "inference.py",
+            "--output-dir", str(out.resolve()),
+            "--input-jsonl", str(input_path.resolve()),
+            "--max-secs", str(max(10.0, request.duration)),
+            "--steps", "16",
+        ]
+        result = subprocess.run(command, cwd=str(self.repo_path), capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(result.stderr[-5000:] or result.stdout[-5000:] or "DiffRhythm generation failed.")
+        target = out / f"{song_name}.mp3"
+        if not target.is_file():
+            matches = sorted(out.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not matches:
+                raise RuntimeError("DiffRhythm finished without producing an MP3.")
+            target = matches[0]
+        return GenerationResult(self.id, str(target), {}, request.seed, {
+            "stdout": result.stdout[-3000:],
+            "reference_used": bool(request.reference_paths),
+            "note": "DiffRhythm is a full-song generator; source-vocal preservation is not guaranteed.",
+        })
 
 
 class LocalCommandProvider:
