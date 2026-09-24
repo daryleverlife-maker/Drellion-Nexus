@@ -78,6 +78,8 @@ class _AceSession:
     def __init__(self):
         self.query_payloads=[]
     def get(self,url,timeout=None):
+        if url.endswith("/v1/models"):
+            return _FakeResponse({"data":{"default_model":"acestep-v15-base","models":[{"name":"acestep-v15-base","is_default":True,"is_loaded":True}]}})
         if url.endswith("/v1/stats"):
             return _FakeResponse({"data":{"version":"1.5"}})
         if "/v1/audio?" in url:
@@ -86,6 +88,9 @@ class _AceSession:
     def post(self,url,**kwargs):
         if url.endswith("/release_task"):
             assert kwargs["data"]["audio_format"]=="wav"
+            assert kwargs["data"]["model"]=="acestep-v15-base"
+            assert "drums" in kwargs["data"]["track_classes"]
+            assert "Complete the input track with" in kwargs["data"]["instruction"]
             assert "src_audio" in kwargs["files"]
             return _FakeResponse({"data":{"task_id":"abc","status":"queued"},"code":200,"error":None})
         if url.endswith("/query_result"):
@@ -101,3 +106,44 @@ def test_acestep_current_api_contract(tmp_path):
     assert fake.query_payloads==[{"task_id_list":["abc"]}]
     assert Path(result.audio_path).exists()
     assert result.metadata["task_id"]=="abc"
+
+
+def test_quality_gate_treats_sparse_arrangement_metrics_as_warnings(tmp_path, monkeypatch):
+    import drellion.quality as quality
+    path=tmp_path/"sparse.wav"
+    sr=8000
+    t=np.arange(sr*8,dtype=np.float32)/sr
+    write_wav(path,(0.15*np.sin(2*np.pi*440*t)).astype(np.float32),sr)
+    monkeypatch.setattr(quality,"_spectral_low_ratio",lambda *_:0.01)
+    monkeypatch.setattr(quality,"_transient_density",lambda *_:0.02)
+    monkeypatch.setattr(quality,"_repetition_score",lambda *_:0.10)
+    monkeypatch.setattr(quality,"_stereo_correlation",lambda *_:1.0)
+    qc=quality.evaluate_preview(path)
+    assert qc.accepted
+    assert not qc.checks["bass_foundation"]
+    assert not qc.checks["drum_activity"]
+    assert "bass foundation" in qc.warnings
+    assert "drum activity" in qc.warnings
+    assert qc.reasons==[]
+
+
+class _AceTurboSession(_AceSession):
+    def __init__(self):
+        super().__init__(); self.init_calls=[]
+    def get(self,url,timeout=None):
+        if url.endswith("/v1/models"):
+            return _FakeResponse({"data":{"default_model":"acestep-v15-turbo","models":[{"name":"acestep-v15-turbo","is_default":True,"is_loaded":True}]}})
+        return super().get(url,timeout)
+    def post(self,url,**kwargs):
+        if url.endswith("/v1/init"):
+            self.init_calls.append(kwargs["json"])
+            return _FakeResponse({"data":{"loaded_model":"acestep-v15-base"},"code":200,"error":None})
+        return super().post(url,**kwargs)
+
+
+def test_acestep_complete_switches_turbo_server_to_base(tmp_path):
+    src=tmp_path/"voice.wav"; src.write_bytes(b"RIFFsource")
+    provider=AceStepHttpProvider("http://127.0.0.1:8001",poll_seconds=0)
+    fake=_AceTurboSession(); provider.session=fake
+    provider.generate(GenerationRequest(source_audio=str(src),prompt="test",seed=8,duration_seconds=20,output_dir=str(tmp_path/"out")))
+    assert fake.init_calls==[{"model":"acestep-v15-base","slot":1,"init_llm":False}]
