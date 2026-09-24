@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 
 from ..export_v2 import ExportOptions, export_project
 from ..health import check_project
-from ..lyrics_v2 import align_plain_lyrics
+from ..lyrics_v2 import WhisperTranscriber, align_plain_lyrics
 from ..providers import create_broker
 from ..storage import StorageSettings, folder_size, format_bytes, free_bytes, load_storage_settings, save_storage_settings
 from ..versions import create_snapshot, list_snapshots, restore_snapshot
@@ -19,15 +19,53 @@ from .common import Page
 class LyricsPage(Page):
     title="Lyrics & Timing"
     def __init__(self,host):
-        super().__init__(host); root=QVBoxLayout(self); title=QLabel("Lyrics & Timing"); title.setStyleSheet("font-size:20px;font-weight:700;")
-        self.editor=QTextEdit(); self.editor.setPlaceholderText("Paste or edit lyrics here"); bar=QHBoxLayout(); align=QPushButton("Align Lines to Vocal Duration"); save=QPushButton("Save Lyrics"); bar.addWidget(save); bar.addWidget(align); bar.addStretch()
-        self.timing=QTableWidget(0,3); self.timing.setHorizontalHeaderLabels(["Start","End","Text"]); self.timing.horizontalHeader().setStretchLastSection(True); save.clicked.connect(self.save_lyrics); align.clicked.connect(self.align); root.addWidget(title); root.addWidget(self.editor,1); root.addLayout(bar); root.addWidget(self.timing,1)
+        super().__init__(host)
+        root=QVBoxLayout(self)
+        title=QLabel("Lyrics & Timing"); title.setStyleSheet("font-size:20px;font-weight:700;")
+        self.editor=QTextEdit(); self.editor.setPlaceholderText("Paste, transcribe, or edit lyrics here")
+        bar=QHBoxLayout()
+        transcribe=QPushButton("Transcribe Lead Vocal (Whisper)")
+        align=QPushButton("Align Lines to Vocal Duration")
+        save=QPushButton("Save Lyrics")
+        transcribe.clicked.connect(self.transcribe); save.clicked.connect(self.save_lyrics); align.clicked.connect(self.align)
+        bar.addWidget(transcribe); bar.addWidget(save); bar.addWidget(align); bar.addStretch()
+        self.status=QLabel("Optional faster-whisper transcription provides timestamped lyrics when installed.")
+        self.status.setWordWrap(True)
+        self.timing=QTableWidget(0,3); self.timing.setHorizontalHeaderLabels(["Start","End","Text"]); self.timing.horizontalHeader().setStretchLastSection(True)
+        root.addWidget(title); root.addWidget(self.editor,1); root.addLayout(bar); root.addWidget(self.status); root.addWidget(self.timing,1)
+
     def refresh(self):
         if not self.project:return
         self.editor.blockSignals(True); self.editor.setPlainText(self.project.lyrics_text); self.editor.blockSignals(False); self._timing()
+
+    def _lead_vocal_path(self):
+        if not self.project:return ""
+        for source in self.project.sources:
+            if source.enabled and source.path and source.role=="Lead Vocal" and Path(source.path).exists():
+                return source.path
+        return ""
+
+    def transcribe(self):
+        path=self._lead_vocal_path()
+        if not path:
+            QMessageBox.warning(self,"Lyrics","Add a valid Lead Vocal source before transcription."); return
+        transcriber=WhisperTranscriber()
+        if not transcriber.available():
+            QMessageBox.information(self,"Whisper transcription","faster-whisper is not installed. Install Drellion with the transcription optional extra, then try again."); return
+        self.host.run_task(lambda:transcriber.transcribe(path),"Transcribing lead vocal",self._transcribed,inject_progress=False)
+
+    def _transcribed(self,result):
+        text,lines=result
+        self.project.lyrics_text=text
+        self.project.lyrics_timed=[{"start":line.start,"end":line.end,"text":line.text} for line in lines]
+        self.project.touch(); self.project.save()
+        self.editor.setPlainText(text); self.status.setText(f"Transcribed {len(lines)} timed lyric segment(s).")
+        self._timing(); self.host.project_changed()
+
     def save_lyrics(self):
         if not self.project:return
         self.project.lyrics_text=self.editor.toPlainText(); self.project.touch(); self.project.save(); self.host.project_changed()
+
     def align(self):
         if not self.project:return
         duration=0.0
@@ -38,12 +76,22 @@ class LyricsPage(Page):
                     from ..audio_core import read_wav
                     duration=max(duration,read_wav(s.path).duration)
                 except Exception:pass
-        if duration<=0:QMessageBox.warning(self,"Lyrics","A WAV source is needed to estimate duration."); return
-        self.project.lyrics_text=self.editor.toPlainText(); self.project.lyrics_timed=[x.to_dict() for x in align_plain_lyrics(self.project.lyrics_text,duration)]; self.project.save(); self._timing(); self.host.project_changed()
+        if duration<=0:
+            QMessageBox.warning(self,"Lyrics","A WAV source is needed to estimate duration."); return
+        self.project.lyrics_text=self.editor.toPlainText()
+        lines=align_plain_lyrics(self.project.lyrics_text,duration)
+        self.project.lyrics_timed=[{"start":x.start,"end":x.end,"text":x.text} for x in lines]
+        self.project.save(); self._timing(); self.host.project_changed()
+        self.status.setText(f"Aligned {len(lines)} lyric line(s) across {duration:.1f} seconds.")
+
     def _timing(self):
         self.timing.setRowCount(0)
-        for i,line in enumerate(self.project.lyrics_timed if self.project else []):
-            self.timing.insertRow(i); self.timing.setItem(i,0,QTableWidgetItem(f"{float(line.get('start',0)):.2f}")); self.timing.setItem(i,1,QTableWidgetItem(f"{float(line.get('end',0)):.2f}")); self.timing.setItem(i,2,QTableWidgetItem(str(line.get('text',''))))
+        if not self.project:return
+        for i,line in enumerate(self.project.lyrics_timed):
+            self.timing.insertRow(i)
+            self.timing.setItem(i,0,QTableWidgetItem(f"{float(line.get('start',0)):.3f}"))
+            self.timing.setItem(i,1,QTableWidgetItem(f"{float(line.get('end',0)):.3f}"))
+            self.timing.setItem(i,2,QTableWidgetItem(str(line.get('text',''))))
 
 
 class EnginesPage(Page):
