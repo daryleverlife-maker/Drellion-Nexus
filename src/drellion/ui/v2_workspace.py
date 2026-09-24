@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
 from ..accessibility import AccessibilitySettings
 from ..project import ProjectState, SourceAsset, ReferenceAsset
 from ..storage import StorageSettings
-from ..production_v2 import generate_three_previews, build_full_song
+from ..production_v2 import generate_three_previews, build_full_song, create_broker
+from ..health import check_project
 from .player import PlayerBar
 from .worker import FunctionThread
 from .theme import stylesheet_for
@@ -423,11 +424,80 @@ class ExportPage(QWidget):
         root.addStretch(1)
 
 
+class EnginesPage(QWidget):
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project = project
+        root = QVBoxLayout(self)
+        title = QLabel("AI ENGINES"); title.setObjectName("PageTitle"); root.addWidget(title)
+        info = QLabel("Configure generation providers. Drellion never silently switches to the Basic Test Engine.")
+        info.setWordWrap(True); root.addWidget(info)
+
+        ace = QGroupBox("ACE-Step 1.5 HTTP")
+        form = QFormLayout(ace)
+        self.ace_endpoint = QLineEdit(str(project.settings.get("ace_step_endpoint", "")))
+        self.ace_endpoint.setPlaceholderText("http://127.0.0.1:8001 or your remote endpoint")
+        self.ace_key = QLineEdit(str(project.settings.get("ace_step_api_key", "")))
+        self.ace_key.setEchoMode(QLineEdit.Password)
+        form.addRow("Endpoint", self.ace_endpoint); form.addRow("API key", self.ace_key)
+        root.addWidget(ace)
+
+        local = QGroupBox("Local Engines")
+        lf = QFormLayout(local)
+        self.ace_local = QLineEdit(str(project.settings.get("ace_step_local_command", "")))
+        self.diff_local = QLineEdit(str(project.settings.get("diffrhythm_local_command", "")))
+        lf.addRow("ACE-Step command", self.ace_local); lf.addRow("DiffRhythm command", self.diff_local)
+        root.addWidget(local)
+
+        self.status = QListWidget(); root.addWidget(self.status)
+        row = QHBoxLayout()
+        save = QPushButton("Save Engine Settings"); save.clicked.connect(self.sync)
+        test = QPushButton("Refresh Status"); test.clicked.connect(self.refresh_status)
+        row.addWidget(save); row.addWidget(test); row.addStretch(1); root.addLayout(row)
+        root.addStretch(1)
+
+    def sync(self):
+        self.project.settings["ace_step_endpoint"] = self.ace_endpoint.text().strip()
+        self.project.settings["ace_step_api_key"] = self.ace_key.text()
+        self.project.settings["ace_step_local_command"] = self.ace_local.text().strip()
+        self.project.settings["diffrhythm_local_command"] = self.diff_local.text().strip()
+        self.project.touch()
+        self.refresh_status()
+
+    def refresh_status(self):
+        self.status.clear()
+        try:
+            broker = create_broker(self.project)
+            statuses = broker.statuses()
+            if not statuses:
+                self.status.addItem("No engines configured.")
+            for item in statuses:
+                self.status.addItem(f"{item.name}: {item.state.value.upper()} — {item.detail}")
+        except Exception as exc:
+            self.status.addItem(f"Engine status error: {exc}")
+
+
+class HealthPage(QWidget):
+    def __init__(self, project: ProjectState, parent=None):
+        super().__init__(parent); self.project = project
+        root = QVBoxLayout(self)
+        title = QLabel("PROJECT HEALTH"); title.setObjectName("PageTitle"); root.addWidget(title)
+        self.list = QListWidget(); root.addWidget(self.list)
+        button = QPushButton("Run Project Check"); button.clicked.connect(self.refresh)
+        root.addWidget(button, 0, Qt.AlignLeft); root.addStretch(1)
+        self.refresh()
+
+    def refresh(self):
+        self.list.clear()
+        for item in check_project(self.project):
+            prefix = "✓" if item.ok else "⚠"
+            self.list.addItem(f"{prefix} {item.name}: {item.detail}")
+
+
 class V2Workspace(QWidget):
     NAV = [
         ("Sources", 0), ("References", 1), ("Direction", 2), ("Previews", 3),
         ("Build", 4), ("Master", 5), ("Studio", 6), ("Library", 7),
-        ("Export", 8), ("Versions", 9), ("Storage", 10),
+        ("Export", 8), ("Versions", 9), ("Storage", 10), ("AI Engines", 11), ("Project Health", 12),
     ]
 
     def __init__(self, project: ProjectState, storage: StorageSettings, accessibility: AccessibilitySettings, parent=None):
@@ -464,6 +534,8 @@ class V2Workspace(QWidget):
         self.stack.addWidget(ExportPage(project))
         self.stack.addWidget(PlaceholderPage("VERSIONS", "Snapshots, autosaves, generated versions, A/B comparisons and restore points.", ["Create Snapshot"]))
         self.storage_page=StoragePage(storage); self.stack.addWidget(self.storage_page)
+        self.engines_page=EnginesPage(project); self.stack.addWidget(self.engines_page)
+        self.health_page=HealthPage(project); self.stack.addWidget(self.health_page)
         body.addWidget(self.stack,1)
         root.addLayout(body,1)
         self.player = PlayerBar(self)
@@ -475,7 +547,7 @@ class V2Workspace(QWidget):
         for i,b in enumerate(self.nav_buttons): b.setChecked(i==index)
 
     def sync(self):
-        self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync()
+        self.sources.sync(); self.references.sync(); self.direction.sync(); self.storage_page.sync(); self.engines_page.sync()
 
     def play_audio(self, label: str, path: str):
         self.player.set_sources({label: path}, preferred=label)
