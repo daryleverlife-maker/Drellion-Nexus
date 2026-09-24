@@ -19,6 +19,7 @@ class V2MainWindow(QMainWindow):
         self.setWindowTitle("Drellion Nexus 2.0")
         self.resize(1500, 940)
         self.setMinimumSize(1100, 720)
+        self.setAcceptDrops(True)
         self.project = ProjectState()
         self.project_path: Path | None = None
         self.storage = StorageSettings.defaults()
@@ -110,3 +111,42 @@ class V2MainWindow(QMainWindow):
             write_autosave(self.project, self.project_path, root["autosaves"])
         except Exception:
             pass
+
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if not paths:
+            return
+        try:
+            for path in paths:
+                if path.suffix.lower() == ".drellion" and path.is_file():
+                    project = ProjectState.load(path)
+                    self.project_path = path
+                    self._replace_project(project)
+                    event.acceptProposedAction()
+                    return
+                if path.is_dir():
+                    # Library page is index 8 in the v2 navigation.
+                    if self.workspace.stack.currentIndex() == 8:
+                        self.project.sound_library_path = str(path)
+                        self.workspace.library_page.path.setText(str(path))
+                        self.workspace.library_page.refresh()
+                    continue
+                if path.suffix.lower() in {".wav",".flac",".mp3",".m4a",".aac",".ogg",".opus",".aiff",".aif",".wma"}:
+                    if self.workspace.stack.currentIndex() == 2 and len(self.project.references) < 6:
+                        self.project.add_reference(path=str(path), title=path.stem)
+                        self.workspace.references.refresh()
+                    else:
+                        role = "Full Song" if self.project.settings.get("start_mode") in ("Full Song","Multiple Songs / Mashup") else "Other"
+                        if not self.project.sources and role == "Other":
+                            role = "Lead Vocal"
+                        self.project.add_source(path=str(path), role=role, label=path.name)
+                        self.workspace.sources.refresh()
+            self.project.touch()
+            event.acceptProposedAction()
+        except Exception as exc:
+            QMessageBox.critical(self, "Drop failed", str(exc))
