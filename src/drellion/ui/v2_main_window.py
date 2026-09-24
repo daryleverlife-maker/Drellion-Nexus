@@ -74,7 +74,10 @@ class V2MainWindow(QMainWindow):
 
     def load_project_path(self, path: str | Path):
         try:
-            self.load_project_path(path)
+            project = ProjectState.load(path)
+            self.project_path = Path(path)
+            project.ensure_layout(self.project_path.parent)
+            self._replace_project(project)
         except Exception as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
 
