@@ -28,6 +28,7 @@ class V2MainWindow(QMainWindow):
         self.setStyleSheet(stylesheet_for(self.accessibility))
 
         self.workspace = V2Workspace(self.project, self.storage, self.accessibility, self)
+        self.workspace.open_project_requested.connect(self.load_project_path)
         self.setCentralWidget(self.workspace)
         self._menus()
 
@@ -63,12 +64,19 @@ class V2MainWindow(QMainWindow):
         self.project = project
         old = self.workspace
         self.workspace = V2Workspace(self.project, self.storage, self.accessibility, self)
+        self.workspace.open_project_requested.connect(self.load_project_path)
         self.setCentralWidget(self.workspace)
         old.deleteLater()
 
     def new_project(self):
         self._replace_project(ProjectState())
         self.project_path = None
+
+    def load_project_path(self, path: str | Path):
+        try:
+            self.load_project_path(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open failed", str(exc))
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Drellion Project", "", "Drellion Project (*.drellion)")
