@@ -5,8 +5,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 import json
+import mimetypes
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 
 
 class ProviderState(str, Enum):
@@ -99,6 +103,141 @@ class AceStepProvider(RemoteHttpProvider):
         stems=True,
         remote=True,
     )
+
+    @staticmethod
+    def _multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
+        boundary = '----DrellionNexus' + uuid.uuid4().hex
+        body = bytearray()
+        for name, value in fields.items():
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            body.extend(str(value).encode('utf-8'))
+            body.extend(b'\r\n')
+        for name, path in files.items():
+            mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+            body.extend(f'--{boundary}\r\n'.encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode()
+            )
+            body.extend(f'Content-Type: {mime}\r\n\r\n'.encode())
+            body.extend(path.read_bytes())
+            body.extend(b'\r\n')
+        body.extend(f'--{boundary}--\r\n'.encode())
+        return bytes(body), f'multipart/form-data; boundary={boundary}'
+
+    def _headers(self, settings: dict[str, Any], content_type: str | None = None) -> dict[str, str]:
+        headers = {'User-Agent': 'Drellion-Nexus/2'}
+        token = str(settings.get('provider_ace_step_token', '') or '').strip()
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        if content_type:
+            headers['Content-Type'] = content_type
+        return headers
+
+    def generate_complete(
+        self,
+        settings: dict[str, Any],
+        *,
+        source_audio: str | Path,
+        reference_audio: str | Path | None,
+        lyrics: str,
+        prompt: str,
+        output_dir: str | Path,
+        duration: float,
+        batch_size: int = 3,
+        bpm: float | None = None,
+        cover_strength: float = 0.25,
+        timeout: float = 1200.0,
+    ) -> list[Path]:
+        endpoint = self.endpoint(settings)
+        if not endpoint:
+            raise RuntimeError('ACE-Step endpoint is not configured.')
+
+        source = Path(source_audio)
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        files = {'src_audio': source}
+        if reference_audio:
+            ref = Path(reference_audio)
+            if ref.is_file():
+                files['reference_audio'] = ref
+
+        fields = {
+            'task_type': 'complete',
+            'prompt': prompt,
+            'lyrics': lyrics or '',
+            'audio_duration': f'{max(4.0, float(duration)):.3f}',
+            'batch_size': str(max(1, min(8, int(batch_size)))),
+            'thinking': 'true',
+            'use_format': 'true',
+            'audio_cover_strength': f'{max(0.0, min(1.0, float(cover_strength))):.3f}',
+            'audio_format': 'flac',
+        }
+        if bpm and bpm > 0:
+            fields['bpm'] = str(round(float(bpm)))
+
+        body, content_type = self._multipart(fields, files)
+        request = urllib.request.Request(
+            endpoint + '/release_task',
+            data=body,
+            method='POST',
+            headers=self._headers(settings, content_type),
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120.0) as response:
+                created = json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode('utf-8', errors='replace')[-4000:]
+            raise RuntimeError(f'ACE-Step task creation failed ({exc.code}): {detail}') from exc
+
+        task_id = ((created.get('data') or {}).get('task_id'))
+        if not task_id:
+            raise RuntimeError(f'ACE-Step did not return a task id: {created}')
+
+        started = time.monotonic()
+        results: list[dict[str, Any]] = []
+        while time.monotonic() - started < timeout:
+            payload = json.dumps({'task_id_list': [task_id]}).encode('utf-8')
+            query = urllib.request.Request(
+                endpoint + '/query_result',
+                data=payload,
+                method='POST',
+                headers=self._headers(settings, 'application/json'),
+            )
+            with urllib.request.urlopen(query, timeout=30.0) as response:
+                status_payload = json.loads(response.read().decode('utf-8'))
+            entries = (status_payload.get('data') or [])
+            entry = entries[0] if entries else {}
+            status = int(entry.get('status', 0) or 0)
+            if status == 2:
+                raise RuntimeError(entry.get('error') or 'ACE-Step generation failed.')
+            if status == 1:
+                raw_result = entry.get('result', '[]')
+                results = json.loads(raw_result) if isinstance(raw_result, str) else (raw_result or [])
+                break
+            time.sleep(2.0)
+        else:
+            raise TimeoutError('ACE-Step generation timed out.')
+
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        downloaded: list[Path] = []
+        for index, item in enumerate(results[:batch_size], start=1):
+            file_ref = str(item.get('file', '') or '')
+            if not file_ref:
+                continue
+            url = file_ref if file_ref.startswith('http') else endpoint + file_ref
+            req = urllib.request.Request(url, headers=self._headers(settings))
+            with urllib.request.urlopen(req, timeout=120.0) as response:
+                data = response.read()
+            suffix = Path(urllib.parse.urlparse(url).path).suffix or '.flac'
+            target = out / f'ace-preview-{index}{suffix}'
+            target.write_bytes(data)
+            downloaded.append(target)
+
+        if not downloaded:
+            raise RuntimeError('ACE-Step completed but returned no downloadable audio.')
+        return downloaded
 
 
 class DiffRhythmProvider(RemoteHttpProvider):
