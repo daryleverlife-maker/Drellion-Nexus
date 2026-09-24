@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import random
+import subprocess
 
 from .audio.analysis import analyze_vocal_file
+from .audio.runtime import require_ffmpeg
 from .project import ProjectState
 from .providers import AceStepHttpProvider, DiffRhythmLocalProvider, EngineBroker, GenerationRequest
 from .quality import PreviewQualityReport, evaluate_preview, write_quality_report
@@ -80,6 +82,33 @@ def _prompt(project: ProjectState) -> str:
     return base
 
 
+def _preview_window(vocal, window: float = 28.0) -> tuple[float, float]:
+    duration=max(1.0,float(vocal.duration))
+    window=min(window,duration)
+    if not vocal.phrase_regions:
+        return 0.0,window
+    candidates=[]
+    starts={max(0.0,min(duration-window,start-1.0)) for start,_ in vocal.phrase_regions}
+    for start in starts:
+        end=start+window
+        active=sum(max(0.0,min(end,b)-max(start,a)) for a,b in vocal.phrase_regions)
+        candidates.append((active,start,end))
+    _,start,end=max(candidates,key=lambda row:row[0])
+    return start,min(duration,end)
+
+
+def _crop_audio(source: str | Path, target: str | Path, start: float, end: float) -> str:
+    target=Path(target); target.parent.mkdir(parents=True,exist_ok=True)
+    duration=max(0.5,end-start)
+    result=subprocess.run([
+        require_ffmpeg(),"-y","-v","error","-ss",f"{start:.3f}","-i",str(source),
+        "-t",f"{duration:.3f}","-vn","-c:a","pcm_s24le",str(target)
+    ],capture_output=True,text=True,check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr[-4000:] or "Could not create preview vocal window.")
+    return str(target)
+
+
 def generate_three_previews(project: ProjectState, output_dir: str | Path) -> list[PreviewCandidate]:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -91,6 +120,10 @@ def generate_three_previews(project: ProjectState, output_dir: str | Path) -> li
     provider = broker.choose(requested)
 
     preview_seconds = min(30.0, max(18.0, vocal.duration))
+    preview_start, preview_end = _preview_window(vocal, preview_seconds)
+    preview_vocal_path = _crop_audio(vocal_path, out / "preview-source-vocal.wav", preview_start, preview_end)
+    preview_seconds = preview_end - preview_start
+    project.settings["preview_region"] = {"start": preview_start, "end": preview_end}
     base_seed = int(project.settings.get("preview_seed", random.randint(1, 2_000_000_000)))
     candidates = []
     reference_analysis = blend_reference_analysis(project)
@@ -98,7 +131,7 @@ def generate_three_previews(project: ProjectState, output_dir: str | Path) -> li
     for index, label in enumerate(("Preview A", "Preview B", "Preview C")):
         seed = base_seed + index * 1009
         generation = provider.generate(GenerationRequest(
-            vocal_path=vocal_path,
+            vocal_path=preview_vocal_path,
             lyrics=project.lyrics,
             reference_paths=references,
             prompt=_prompt(project),
