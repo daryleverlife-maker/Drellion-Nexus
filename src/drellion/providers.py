@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import json
 import mimetypes
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -127,7 +128,7 @@ class AceStepProvider(RemoteHttpProvider):
 
     def _headers(self, settings: dict[str, Any], content_type: str | None = None) -> dict[str, str]:
         headers = {'User-Agent': 'Drellion-Nexus/2'}
-        token = str(settings.get('provider_ace_step_token', '') or '').strip()
+        token = str(os.environ.get('DRELLION_ACE_TOKEN', '') or settings.get('provider_ace_step_token', '') or '').strip()
         if token:
             headers['Authorization'] = f'Bearer {token}'
         if content_type:
