@@ -42,9 +42,12 @@ jobs:
           gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Portable" --dir release-assets
           gh run download "$RUN_ID" --repo "${{ github.repository }}" --name "Drellion-Nexus-2.0-Checksums" --dir release-assets
           ls -lah release-assets
-          test -f release-assets/Drellion-Nexus-2.0-Setup.exe
-          test -f release-assets/Drellion-Nexus-2.0-Portable.zip
+          test -f release-assets/Drellion-Nexus-2.0.1-Setup.exe
+          test -f release-assets/Drellion-Nexus-2.0.1-Portable.zip
           test -f release-assets/checksums.sha256
+          mv release-assets/Drellion-Nexus-2.0.1-Setup.exe release-assets/Drellion-Nexus-2.0.1-Setup.exe
+          mv release-assets/Drellion-Nexus-2.0.1-Portable.zip release-assets/Drellion-Nexus-2.0.1-Portable.zip
+          sed -i 's/Drellion-Nexus-2.0.1-Setup.exe/Drellion-Nexus-2.0.1-Setup.exe/g; s/Drellion-Nexus-2.0.1-Portable.zip/Drellion-Nexus-2.0.1-Portable.zip/g' release-assets/checksums.sha256
 
       - name: Write release notes
         shell: bash
@@ -62,8 +65,8 @@ jobs:
           - Accessibility foundation with scalable UI and keyboard/screen-reader-oriented controls
 
           Windows assets:
-          - Drellion-Nexus-2.0-Setup.exe
-          - Drellion-Nexus-2.0-Portable.zip
+          - Drellion-Nexus-2.0.1-Setup.exe
+          - Drellion-Nexus-2.0.1-Portable.zip
           - checksums.sha256
 
           A configured ACE-Step or DiffRhythm production engine is required for production-quality AI generation. The Basic Test Engine is demo/developer quality and is never selected silently.
@@ -74,8 +77,10 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
+            gh release delete-asset "$RELEASE_TAG" "Drellion-Nexus-2.0-Setup.exe" --repo "${{ github.repository }}" --yes || true
+            gh release delete-asset "$RELEASE_TAG" "Drellion-Nexus-2.0-Portable.zip" --repo "${{ github.repository }}" --yes || true
+            gh release upload "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.1-Setup.exe release-assets/Drellion-Nexus-2.0.1-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --clobber
             gh release edit "$RELEASE_TAG" --repo "${{ github.repository }}" --title "Drellion Nexus 2.0.1" --notes-file release-notes.md --latest
           else
-            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0-Setup.exe release-assets/Drellion-Nexus-2.0-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.1" --notes-file release-notes.md --latest
+            gh release create "$RELEASE_TAG" release-assets/Drellion-Nexus-2.0.1-Setup.exe release-assets/Drellion-Nexus-2.0.1-Portable.zip release-assets/checksums.sha256 --repo "${{ github.repository }}" --target main --title "Drellion Nexus 2.0.1" --notes-file release-notes.md --latest
           fi
