@@ -3,7 +3,7 @@ name: Windows Build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, v2]
     paths:
       - "src/**"
       - "tests/**"
@@ -99,7 +99,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Installer
+          name: Drellion-Nexus-${{ github.ref_name }}-Installer
           path: installer-output/Drellion-Nexus-Setup.exe
           if-no-files-found: error
           retention-days: 14
@@ -107,7 +107,7 @@ jobs:
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Portable
+          name: Drellion-Nexus-${{ github.ref_name }}-Portable
           path: Drellion-Nexus-Portable.zip
           if-no-files-found: error
           retention-days: 14
@@ -115,7 +115,7 @@ jobs:
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: Drellion-Nexus-Checksums
+          name: Drellion-Nexus-${{ github.ref_name }}-Checksums
           path: checksums.sha256
           if-no-files-found: error
           retention-days: 14
