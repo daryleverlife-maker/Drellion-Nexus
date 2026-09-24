@@ -392,7 +392,7 @@ class NexusEngine:
             return self._generate_previews_basic(state, output_dir)
         if not isinstance(provider, AceStepProvider):
             raise RuntimeError(
-                f'{provider.name} is configured but v2 vocal-complete preview routing is not enabled for it yet.'
+                f'{provider.name} is configured but v2 vocal-conditioned accompaniment routing is not enabled for it yet.'
             )
 
         vocal = self.analyze_vocal(state)
@@ -404,10 +404,15 @@ class NexusEngine:
         preview_duration = min(30.0, max(12.0, vocal.duration))
         prompt = self._production_prompt(state, reference)
         cover_strength = float(state.settings.get('reference_audio_strength', 25.0)) / 100.0
+        processed_vocal = process_vocal(
+            state.vocal.path,
+            out / 'preview-vocal.wav',
+            state.vocal_preservation,
+        )
 
-        candidates: list[Path] = []
+        accepted: list[tuple[Path, Path, float]] = []
         attempts = 0
-        while len(candidates) < 3 and attempts < 2:
+        while len(accepted) < 3 and attempts < 2:
             attempts += 1
             generated = provider.generate_complete(
                 state.settings,
@@ -417,52 +422,72 @@ class NexusEngine:
                 prompt=prompt,
                 output_dir=out / f'provider-pass-{attempts}',
                 duration=preview_duration,
-                batch_size=3 - len(candidates),
+                batch_size=3 - len(accepted),
                 bpm=reference.bpm,
                 cover_strength=cover_strength,
             )
-            for candidate in generated:
-                report = inspect_preview(candidate)
-                if report.passed:
-                    candidates.append(candidate)
+            for accompaniment in generated:
+                inst_qc = inspect_preview(accompaniment)
+                mixed = out / f'candidate-{attempts}-{len(accepted) + 1}.wav'
+                mix_vocal_and_instrumental(
+                    processed_vocal,
+                    accompaniment,
+                    mixed,
+                    instrumental_gain_db=float(state.settings.get('preview_instrumental_gain_db', -3.0)),
+                    duration=preview_duration,
+                )
+                mix_qc = inspect_preview(mixed)
+                passed = inst_qc.passed and mix_qc.passed
+                score = min(inst_qc.score, mix_qc.score)
+                if passed:
+                    accepted.append((accompaniment, mixed, score))
                 else:
                     reject = out / 'rejected-qc.jsonl'
                     with reject.open('a', encoding='utf-8') as handle:
                         handle.write(json.dumps({
-                            'path': str(candidate),
-                            'score': report.score,
-                            'failures': [asdict(item) for item in report.failures],
+                            'accompaniment': str(accompaniment),
+                            'mix': str(mixed),
+                            'score': score,
+                            'instrument_failures': [asdict(item) for item in inst_qc.failures],
+                            'mix_failures': [asdict(item) for item in mix_qc.failures],
                         }) + '\n')
-                if len(candidates) >= 3:
+                if len(accepted) >= 3:
                     break
 
-        if len(candidates) < 3:
+        if len(accepted) < 3:
             raise RuntimeError(
-                'Generation completed, but fewer than three previews passed Drellion Beat QC. '
-                'No weak preview was shown. Try another provider, direction or reference blend.'
+                'Generation completed, but fewer than three vocal + accompaniment previews '
+                'passed Drellion Beat QC. Weak candidates were rejected automatically.'
             )
 
         previews: list[ArrangementPreview] = []
-        for index, candidate in enumerate(candidates[:3]):
+        instrumental_map: dict[str, str] = {}
+        for index, (accompaniment, mixed, score) in enumerate(accepted[:3]):
             name = ('Preview A', 'Preview B', 'Preview C')[index]
-            report = inspect_preview(candidate)
-            target = out / f'preview-{index + 1}{candidate.suffix}'
-            if candidate.resolve() != target.resolve():
-                target.write_bytes(candidate.read_bytes())
+            target = out / f'preview-{index + 1}.wav'
+            target.write_bytes(mixed.read_bytes())
+            inst_target = out / f'preview-{index + 1}-instrumental{accompaniment.suffix}'
+            if accompaniment.resolve() != inst_target.resolve():
+                inst_target.write_bytes(accompaniment.read_bytes())
+            instrumental_map[name] = str(inst_target)
             previews.append(ArrangementPreview(
                 name=name,
                 audio_path=str(target),
-                description=f'{provider.name} complete arrangement · Beat QC {report.score:.0f}/100 · {reference.bpm:.1f} BPM blend',
+                description=(
+                    f'{provider.name} Base Complete accompaniment + preserved vocal · '
+                    f'Beat QC {score:.0f}/100 · {reference.bpm:.1f} BPM reference blend'
+                ),
                 similarity={
                     'reference_bpm': reference.bpm,
-                    'generated_bpm': self.analyze_mix(target).bpm,
-                    'qc_score': report.score,
+                    'generated_bpm': self.analyze_mix(inst_target).bpm,
+                    'qc_score': score,
                     'exact_reference_hits_reused': 0.0,
                 },
             ))
 
         state.settings['preview_provider'] = provider.id
         state.settings['preview_paths'] = {item.name: item.audio_path for item in previews}
+        state.settings['preview_instrumentals'] = instrumental_map
         state.settings['preview_reference_prompt'] = prompt
         (out / 'previews.json').write_text(
             json.dumps([asdict(item) for item in previews], indent=2),
@@ -477,7 +502,7 @@ class NexusEngine:
             return self._build_basic(state, output_dir)
         if not isinstance(provider, AceStepProvider):
             raise RuntimeError(
-                f'{provider.name} is configured but v2 vocal-complete Build routing is not enabled for it yet.'
+                f'{provider.name} is configured but v2 vocal-conditioned accompaniment Build routing is not enabled for it yet.'
             )
 
         vocal = self.analyze_vocal(state)
@@ -500,17 +525,44 @@ class NexusEngine:
             bpm=reference.bpm,
             cover_strength=cover_strength,
         )
-        build_source = generated[0]
-        qc = inspect_preview(build_source)
-        if not qc.passed:
-            raise RuntimeError(
-                'Full build failed Drellion Beat QC: '
-                + '; '.join(item.name for item in qc.failures)
+        raw_accompaniment = generated[0]
+        instrumental = out / ('generated-instrumental' + raw_accompaniment.suffix)
+        if raw_accompaniment.resolve() != instrumental.resolve():
+            instrumental.write_bytes(raw_accompaniment.read_bytes())
+
+        selected_sfx = list(state.settings.get('selected_sfx', []) or [])
+        if selected_sfx:
+            instrumental = mix_sfx_events(
+                instrumental,
+                selected_sfx,
+                out / 'generated-instrumental-with-sfx.wav',
             )
 
-        build_path = out / ('build' + build_source.suffix)
-        if build_source.resolve() != build_path.resolve():
-            build_path.write_bytes(build_source.read_bytes())
+        inst_qc = inspect_preview(instrumental)
+        if not inst_qc.passed:
+            raise RuntimeError(
+                'Generated accompaniment failed Drellion Beat QC: '
+                + '; '.join(item.name for item in inst_qc.failures)
+            )
+
+        processed_vocal = process_vocal(
+            state.vocal.path,
+            out / 'processed-vocal.wav',
+            state.vocal_preservation,
+        )
+        build_path = mix_vocal_and_instrumental(
+            processed_vocal,
+            instrumental,
+            out / 'build.wav',
+            instrumental_gain_db=float(state.settings.get('build_instrumental_gain_db', -3.0)),
+            duration=max(vocal.duration, self.analyze_mix(instrumental).duration),
+        )
+        mix_qc = inspect_preview(build_path)
+        if not mix_qc.passed:
+            raise RuntimeError(
+                'Vocal + accompaniment build failed Drellion Beat QC: '
+                + '; '.join(item.name for item in mix_qc.failures)
+            )
 
         lyric_cues = align_lyrics(state.lyrics, vocal.phrase_regions, vocal.duration)
         lyric_path = ''
@@ -520,39 +572,49 @@ class NexusEngine:
             lyric_path = str(lrc)
 
         stem_paths: list[str] = []
-        stem_warning = ""
+        stem_warning = ''
         if bool(state.settings.get('auto_split_generated', True)):
             open_unmix = next((item for item in tool_statuses() if item.id == 'open_unmix'), None)
             if open_unmix and open_unmix.available:
                 try:
                     stem_paths = [
                         str(path)
-                        for path in separate_open_unmix(build_path, out / 'Stems')
+                        for path in separate_open_unmix(instrumental, out / 'Stems')
                     ]
                     state.settings['generated_stems'] = stem_paths
                 except Exception as exc:
                     stem_warning = str(exc)
             else:
-                stem_warning = 'Open-Unmix is not installed; generated build remains a stereo file.'
+                stem_warning = 'Open-Unmix is not installed; accompaniment remains a stereo instrumental.'
 
+        state.settings['generated_instrumental'] = str(instrumental)
+        state.settings['processed_vocal'] = str(processed_vocal)
         report_path = out / 'report.json'
         report_path.write_text(json.dumps({
             'engine': provider.name,
             'provider_id': provider.id,
-            'beat_qc_score': qc.score,
+            'accompaniment_qc_score': inst_qc.score,
+            'mix_qc_score': mix_qc.score,
             'reference_blend': asdict(reference),
             'reference_count': len(self._enabled_references(state)),
             'prompt': prompt,
-            'source_vocal_preserved_as_condition': True,
+            'source_vocal_preserved_separately': True,
+            'ace_task': 'complete',
+            'ace_model': state.settings.get('provider_ace_step_model', 'acestep-v15-base'),
             'exact_reference_audio_copied': False,
+            'selected_sfx': selected_sfx,
             'stem_paths': stem_paths,
             'stem_warning': stem_warning,
-            'outputs': {'build': str(build_path)},
+            'outputs': {
+                'processed_vocal': str(processed_vocal),
+                'instrumental': str(instrumental),
+                'build': str(build_path),
+            },
         }, indent=2), encoding='utf-8')
 
         return BuildResult(
             build_path=str(build_path),
-            instrumental_path='',
+            instrumental_path=str(instrumental),
             report_path=str(report_path),
             lyric_path=lyric_path,
             stem_paths=stem_paths,
