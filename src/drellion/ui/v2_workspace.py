@@ -510,6 +510,7 @@ class BuildPage(QWidget):
         text = QLabel("Build the chosen arrangement using the selected real generation provider. Drellion will not silently switch to the Basic Test Engine.")
         text.setWordWrap(True); root.addWidget(text)
         self.status = QLabel("Select a passing preview first."); root.addWidget(self.status)
+        self.stems = QCheckBox("Create editable stems after build when a stem engine is installed"); self.stems.setChecked(bool(project.settings.get("auto_separate_generated", True))); root.addWidget(self.stems)
         self.button = QPushButton("Build Full Song"); self.button.setObjectName("Primary"); self.button.clicked.connect(self.build)
         root.addWidget(self.button, 0, Qt.AlignLeft)
         self.play = QPushButton("Play Build"); self.play.setEnabled(False); self.play.clicked.connect(self.play_build); root.addWidget(self.play, 0, Qt.AlignLeft)
@@ -520,6 +521,7 @@ class BuildPage(QWidget):
         if not self.project.selected_preview or seed is None:
             QMessageBox.information(self, "Build", "Select a preview that passed QC first.")
             return
+        self.project.settings["auto_separate_generated"] = self.stems.isChecked()
         self.button.setEnabled(False)
         self.status.setText("Building the full arrangement…")
         out = self.project.ensure_layout()["generated"]
