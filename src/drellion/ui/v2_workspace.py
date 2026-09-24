@@ -79,6 +79,8 @@ class AccessibilityDialog(QDialog):
 
 
 class DashboardPage(QWidget):
+    open_project_requested = Signal(str)
+
     def __init__(self, project: ProjectState, storage: StorageSettings, parent=None):
         super().__init__(parent); self.project=project; self.storage=storage
         root=QVBoxLayout(self)
@@ -106,8 +108,15 @@ class DashboardPage(QWidget):
         actions=QHBoxLayout()
         folder=QPushButton("Create/Open Project Folders"); folder.clicked.connect(self.create_folders)
         actions.addWidget(folder); actions.addStretch(1); root.addLayout(actions)
-        root.addStretch(1)
-        self.refresh_status()
+
+        recent_box=QGroupBox("Recent Projects")
+        recent_layout=QVBoxLayout(recent_box)
+        self.recent=QListWidget(); self.recent.itemDoubleClicked.connect(self._open_recent)
+        recent_layout.addWidget(self.recent)
+        recent_refresh=QPushButton("Refresh Recent Projects"); recent_refresh.clicked.connect(self.refresh_recent)
+        recent_layout.addWidget(recent_refresh,0,Qt.AlignLeft)
+        root.addWidget(recent_box,1)
+        self.refresh_status(); self.refresh_recent()
 
     def _browse(self):
         path=QFileDialog.getExistingDirectory(self,"Choose project folder",self.root.text())
@@ -125,6 +134,20 @@ class DashboardPage(QWidget):
         folders=self.project.ensure_layout(self.project.project_root)
         self.root.setText(str(folders["root"]))
         QMessageBox.information(self,"Project Folders",f"Project folders ready:\n{folders['root']}")
+
+    def refresh_recent(self):
+        self.recent.clear()
+        root=Path(self.storage.projects)
+        if not root.is_dir():
+            return
+        paths=sorted(root.rglob("*.drellion"),key=lambda p:p.stat().st_mtime,reverse=True)[:30]
+        for path in paths:
+            self.recent.addItem(str(path))
+
+    def _open_recent(self,item):
+        path=item.text().strip()
+        if path:
+            self.open_project_requested.emit(path)
 
     def refresh_status(self):
         self.status.setText(
@@ -696,6 +719,8 @@ class ExportPage(QWidget):
 
 
 class V2Workspace(QWidget):
+    open_project_requested = Signal(str)
+
     NAV = [
         ("Dashboard", 0), ("Sources", 1), ("References", 2), ("Direction", 3), ("Previews", 4),
         ("Build", 5), ("Master", 6), ("Studio", 7), ("Library", 8),
@@ -724,7 +749,7 @@ class V2Workspace(QWidget):
         body.addWidget(nav_widget)
 
         self.stack=QStackedWidget()
-        self.dashboard=DashboardPage(project,storage); self.stack.addWidget(self.dashboard)
+        self.dashboard=DashboardPage(project,storage); self.dashboard.open_project_requested.connect(self.open_project_requested.emit); self.stack.addWidget(self.dashboard)
         self.sources=SourcesPage(project); self.references=ReferencesPage(project); self.direction=DirectionPage(project)
         self.stack.addWidget(self.sources)
         self.stack.addWidget(self.references)
